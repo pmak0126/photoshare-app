@@ -1,6 +1,7 @@
 import os
 import json
 import base64
+import io
 import numpy as np
 import traceback
 from datetime import datetime
@@ -8,9 +9,10 @@ from flask import Flask, request, jsonify, redirect, session, url_for
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
+import face_recognition
+from PIL import Image
 
-# --- Configuration ---
-VERSION = "v3"
+VERSION = "v3-facematch"
 ALLOWED_USERS = ["pranavcoolstar@gmail.com", "makwanapranav26@gmail.com"]
 
 SPREADSHEET_ID = "1gWWBNpKU1lIEz7RCiCycIqvg_QJKARqPJHbpIr78RvE"
@@ -43,10 +45,16 @@ def get_client_config():
             return json.loads(env_secrets), None
     raise FileNotFoundError("Neither client_secret.json nor CLIENT_SECRET_JSON environment variable was found.")
 
-def extract_face_embedding(image_bytes):
-    if not image_bytes:
-        return None
-    return list(np.random.normal(0, 1, 128)) 
+def extract_face_embeddings(image_bytes):
+    try:
+        image = Image.open(io.BytesIO(image_bytes))
+        image = image.convert('RGB')
+        np_img = np.array(image)
+        encodings = face_recognition.face_encodings(np_img)
+        return encodings
+    except Exception as e:
+        print(f"Error extracting face embedding: {e}")
+        return []
 
 def get_google_services(creds_dict):
     client_config, _ = get_client_config()
@@ -61,7 +69,6 @@ def get_google_services(creds_dict):
     gmail_service = build('gmail', 'v1', credentials=creds)
     return drive_service, sheets_service, gmail_service
 
-# --- UI 1: Root Portal ---
 @app.route('/')
 def home():
     return f'''
@@ -91,7 +98,6 @@ def home():
     </html>
     '''
 
-# --- UI 2: Public Check-In Form ---
 @app.route('/checkin')
 def checkin_form():
     return '''
@@ -137,7 +143,7 @@ def checkin_form():
                     const result = await response.json();
                     if (response.ok && result.success) {
                         messageDiv.className = 'success';
-                        messageDiv.innerHTML = '🎉 Check-in logged successfully!';
+                        messageDiv.innerHTML = '🎉 Check-in logged successfully with face encoding!';
                         messageDiv.style.display = 'block';
                         this.reset();
                     } else { throw new Error(result.error || 'Server error'); }
@@ -152,7 +158,6 @@ def checkin_form():
     </html>
     '''
 
-# --- UI 3: Operations Dashboard ---
 @app.route('/dashboard')
 def dashboard():
     if 'credentials' not in session:
@@ -353,7 +358,7 @@ def dashboard():
 
             async function processImage() {
                 if (!currentSelectedFolder) return;
-                logConsole(`Running image processing for folder "${currentSelectedFolder.name}"...`);
+                logConsole(`Running facial recognition for folder "${currentSelectedFolder.name}"...`);
                 document.getElementById('btnProcessImage').disabled = true;
 
                 try {
@@ -365,11 +370,11 @@ def dashboard():
                     const data = await res.json();
                     if (data.error) throw new Error(data.error);
 
-                    logConsole(`Processing complete for "${currentSelectedFolder.name}". Extracted faces & updated matches.`);
+                    logConsole(`Processing complete for "${currentSelectedFolder.name}". Found real matches for ${data.matched_patrons} patron(s).`);
                     await loadGrid1Folders();
                     await loadGrid2Patrons(currentSelectedFolder.id);
                 } catch (err) {
-                    logConsole('ERROR during processing: ' + err.message);
+                    logConsole('ERROR during facial recognition processing: ' + err.message);
                 } finally {
                     document.getElementById('btnProcessImage').disabled = false;
                 }
@@ -430,7 +435,6 @@ def dashboard():
     '''
     return html.replace('USER_EMAIL_PLACEHOLDER', email)
 
-# --- OAuth Authorization ---
 @app.route('/api/auth/login')
 def login():
     client_config, client_file = get_client_config()
@@ -515,7 +519,6 @@ def logout():
     session.clear()
     return redirect('/')
 
-# --- Public Guest Check-in Endpoint ---
 @app.route('/api/patron/checkin', methods=['POST'])
 def patron_checkin():
     global system_creds_cache
@@ -528,23 +531,24 @@ def patron_checkin():
         return jsonify({"error": "Missing mandatory fields"}), 400
 
     img_bytes = selfie_file.read()
-    embedding = extract_face_embedding(img_bytes)
-    if embedding is None:
-        return jsonify({"error": "Submission rejected: Face not detected."}), 400
+    encodings = extract_face_embeddings(img_bytes)
+    if not encodings:
+        return jsonify({"error": "Submission rejected: No face detected in uploaded selfie."}), 400
+
+    embedding_json = json.dumps(encodings[0].tolist())
 
     creds_to_use = session.get('credentials') or system_creds_cache
-    
     if not creds_to_use:
         return jsonify({"error": "Server not authenticated with Google Sheets yet. Admin must log in once at /api/auth/login to authorize guest check-ins."}), 503
 
     try:
         _, sheets_srv, _ = get_google_services(creds_to_use)
         
-        new_row = [[name, email, phone, datetime.utcnow().isoformat()]]
+        new_row = [[name, email, phone, datetime.utcnow().isoformat(), embedding_json]]
         
         sheets_srv.spreadsheets().values().append(
             spreadsheetId=SPREADSHEET_ID,
-            range="Sheet1!A:D",
+            range="Sheet1!A:E",
             valueInputOption="USER_ENTERED",
             body={"values": new_row}
         ).execute()
@@ -553,7 +557,6 @@ def patron_checkin():
     except Exception as e:
         return jsonify({"error": f"Failed to append to Google Sheets: {str(e)}"}), 500
 
-# --- Grid 1 Backend API ---
 @app.route('/api/admin/folders')
 def api_get_folders():
     if 'credentials' not in session:
@@ -606,7 +609,6 @@ def api_get_folders():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# --- Grid 2 Backend API ---
 @app.route('/api/admin/matched-patrons')
 def api_matched_patrons():
     if 'credentials' not in session:
@@ -643,7 +645,6 @@ def api_matched_patrons():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# --- Button 1 Backend API ---
 @app.route('/api/admin/process-folder', methods=['POST'])
 def api_process_folder():
     if 'credentials' not in session:
@@ -666,36 +667,66 @@ def api_process_folder():
         if not image_files:
             return jsonify({"success": True, "processed_count": 0, "message": "No images found."})
 
-        photo_links = "\n".join([img.get('webViewLink', f"https://drive.google.com/file/d/{img['id']}/view") for img in image_files])
-        match_count = len(image_files)
-
         patron_data = []
         try:
-            p_res = sheets_srv.spreadsheets().values().get(spreadsheetId=SPREADSHEET_ID, range="Sheet1!A2:D").execute()
+            p_res = sheets_srv.spreadsheets().values().get(spreadsheetId=SPREADSHEET_ID, range="Sheet1!A2:E").execute()
             patron_data = p_res.get('values', [])
         except Exception:
             patron_data = []
 
         if not patron_data:
-            return jsonify({"error": "No patrons found in Sheet1."}), 400
+            return jsonify({"error": "No registered patrons found in Sheet1."}), 400
+
+        known_patrons = []
+        for p in patron_data:
+            if len(p) >= 5:
+                try:
+                    encoding = np.array(json.loads(p[4]))
+                    known_patrons.append({
+                        "name": p[0],
+                        "email": p[1],
+                        "phone": p[2],
+                        "encoding": encoding,
+                        "matched_links": []
+                    })
+                except Exception:
+                    continue
+
+        if not known_patrons:
+            return jsonify({"error": "No patrons with valid face encodings found in Sheet1."}), 400
+
+        for img in image_files:
+            try:
+                img_content = drive_srv.files().get_media(fileId=img['id']).execute()
+                img_encodings = extract_face_embeddings(img_content)
+                img_link = img.get('webViewLink', f"https://drive.google.com/file/d/{img['id']}/view")
+
+                for face_enc in img_encodings:
+                    for patron in known_patrons:
+                        distance = face_recognition.face_distance([patron['encoding']], face_enc)[0]
+                        if distance <= 0.6:
+                            if img_link not in patron['matched_links']:
+                                patron['matched_links'].append(img_link)
+            except Exception as file_err:
+                print(f"Error processing image {img['id']}: {file_err}")
+                continue
 
         timestamp_now = datetime.utcnow().isoformat()
         new_matched_rows = []
 
-        for p in patron_data:
-            if len(p) >= 3:
-                p_name = p[0]
-                p_email = p[1]
-                p_phone = p[2]
+        for patron in known_patrons:
+            if patron['matched_links']:
+                links_str = "\n".join(patron['matched_links'])
+                match_count = len(patron['matched_links'])
 
                 new_matched_rows.append([
-                    folder_id,        # Col A: Contact_ID / Folder_ID
-                    p_name,           # Col B: Name
-                    p_email,          # Col C: Email
-                    p_phone,          # Col D: Phone
-                    match_count,      # Col E: Match_Count
-                    photo_links,      # Col F: Photo_Links
-                    timestamp_now     # Col G: Delivered_At
+                    folder_id,
+                    patron['name'],
+                    patron['email'],
+                    patron['phone'],
+                    match_count,
+                    links_str,
+                    timestamp_now
                 ])
 
         if new_matched_rows:
@@ -710,7 +741,6 @@ def api_process_folder():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# --- Button 2 & Single Share APIs ---
 @app.route('/api/admin/share-single', methods=['POST'])
 def api_share_single():
     if 'credentials' not in session:
