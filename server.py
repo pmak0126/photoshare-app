@@ -1,19 +1,18 @@
 import os
 import json
 import numpy as np
+import traceback
 from datetime import datetime
 from flask import Flask, request, jsonify, redirect, session, url_for
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 
-# --- Configuration & Version Constraints ---
 VERSION = "v1"
 ALLOWED_USERS = ["pranavcoolstar@gmail.com", "makwanapranav26@gmail.com"]
 
-# Live Google Sheet configuration
 SPREADSHEET_ID = "1gWWBNpKU1lIEz7RCiCycIqvg_QJKARqPJHbpIr78RvE"
-SHEET_RANGE = "Sheet1!A2:D"  # Reads rows from column A down to D, ignoring header row
+SHEET_RANGE = "Sheet1!A2:D"
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", "super_secret_dev_key")
@@ -23,7 +22,18 @@ app.config.update(
     SESSION_COOKIE_SAMESITE='None',
 )
 
-# Mock Face Model for Blueprint
+@app.errorhandler(500)
+def handle_500_error(e):
+    return f"<h1>500 Internal Server Error (Diagnostic Catch)</h1><pre>{traceback.format_exc()}</pre>", 500
+
+def get_client_config():
+    if os.path.exists('client_secret.json'):
+        return None, 'client_secret.json'
+    env_secrets = os.environ.get('CLIENT_SECRET_JSON')
+    if env_secrets:
+        return json.loads(env_secrets), None
+    raise FileNotFoundError("Neither client_secret.json nor CLIENT_SECRET_JSON environment variable was found.")
+
 def extract_face_embedding(image_bytes):
     if not image_bytes:
         return None
@@ -36,7 +46,6 @@ def get_google_services(creds_dict):
     gmail_service = build('gmail', 'v1', credentials=creds)
     return drive_service, sheets_service, gmail_service
 
-# --- UI 1: Root Portal Directory ---
 @app.route('/')
 def home():
     return f'''
@@ -67,31 +76,30 @@ def home():
     </html>
     '''
 
-# --- UI 2: Public Patron Check-In View ---
 @app.route('/checkin')
 def checkin_form():
-    return f'''
+    return '''
     <!DOCTYPE html>
     <html>
     <head>
         <title>Event Guest Check-In</title>
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <style>
-            body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 0; background: #e9ecef; padding: 20px; color: #333; }}
-            .form-container {{ max-width: 480px; margin: 40px auto; background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); }}
-            h2 {{ margin-top: 0; color: #212529; font-size: 1.5rem; text-align: center; }}
-            p.subtitle {{ text-align: center; color: #6c757d; font-size: 0.9rem; margin-top: -10px; margin-bottom: 25px; }}
-            .form-group {{ margin-bottom: 20px; }}
-            label {{ display: block; font-weight: 500; margin-bottom: 6px; color: #495057; font-size: 0.9rem; }}
-            input[type="text"], input[type="email"], input[type="tel"] {{ width: 100%; padding: 10px; border: 1px solid #ced4da; border-radius: 6px; box-sizing: border-box; font-size: 1rem; }}
-            input:focus {{ border-color: #007BFF; outline: none; box-shadow: 0 0 0 3px rgba(0,123,255,0.15); }}
-            input[type="file"] {{ display: block; margin-top: 5px; font-size: 0.9rem; }}
-            .btn {{ width: 100%; background: #007BFF; color: white; border: none; padding: 12px; border-radius: 6px; font-size: 1rem; font-weight: bold; cursor: pointer; margin-top: 10px; transition: background 0.2s; }}
-            .btn:hover {{ background: #0056b3; }}
-            .btn:disabled {{ background: #6c757d; cursor: not-allowed; }}
-            #message {{ margin-top: 20px; padding: 12px; border-radius: 6px; display: none; font-size: 0.95rem; text-align: center; }}
-            .success {{ background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }}
-            .error {{ background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }}
+            body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 0; background: #e9ecef; padding: 20px; color: #333; }
+            .form-container { max-width: 480px; margin: 40px auto; background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
+            h2 { margin-top: 0; color: #212529; font-size: 1.5rem; text-align: center; }
+            p.subtitle { text-align: center; color: #6c757d; font-size: 0.9rem; margin-top: -10px; margin-bottom: 25px; }
+            .form-group { margin-bottom: 20px; }
+            label { display: block; font-weight: 500; margin-bottom: 6px; color: #495057; font-size: 0.9rem; }
+            input[type="text"], input[type="email"], input[type="tel"] { width: 100%; padding: 10px; border: 1px solid #ced4da; border-radius: 6px; box-sizing: border-box; font-size: 1rem; }
+            input:focus { border-color: #007BFF; outline: none; box-shadow: 0 0 0 3px rgba(0,123,255,0.15); }
+            input[type="file"] { display: block; margin-top: 5px; font-size: 0.9rem; }
+            .btn { width: 100%; background: #007BFF; color: white; border: none; padding: 12px; border-radius: 6px; font-size: 1rem; font-weight: bold; cursor: pointer; margin-top: 10px; transition: background 0.2s; }
+            .btn:hover { background: #0056b3; }
+            .btn:disabled { background: #6c757d; cursor: not-allowed; }
+            #message { margin-top: 20px; padding: 12px; border-radius: 6px; display: none; font-size: 0.95rem; text-align: center; }
+            .success { background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
+            .error { background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
         </style>
     </head>
     <body>
@@ -121,7 +129,7 @@ def checkin_form():
         </div>
 
         <script>
-            document.getElementById('checkinForm').addEventListener('submit', async function(e) {{
+            document.getElementById('checkinForm').addEventListener('submit', async function(e) {
                 e.preventDefault();
                 const submitBtn = document.getElementById('submitBtn');
                 const messageDiv = document.getElementById('message');
@@ -130,35 +138,34 @@ def checkin_form():
                 messageDiv.style.display = 'none';
 
                 const formData = new FormData(this);
-                try {{
-                    const response = await fetch('/api/patron/checkin', {{
+                try {
+                    const response = await fetch('/api/patron/checkin', {
                         method: 'POST',
                         body: formData
-                    }});
+                    });
                     const result = await response.json();
-                    if (response.ok && result.success) {{
+                    if (response.ok && result.success) {
                         messageDiv.className = 'success';
                         messageDiv.innerHTML = '🎉 <strong>Success!</strong> Registration logged into secure data sync pipeline.';
                         messageDiv.style.display = 'block';
                         document.getElementById('checkinForm').reset();
-                    }} else {{
+                    } else {
                         throw new Error(result.error || 'Server error occurred.');
-                    }}
-                }} catch (error) {{
+                    }
+                } catch (error) {
                     messageDiv.className = 'error';
                     messageDiv.innerHTML = '❌ <strong>Error:</strong> ' + error.message;
                     messageDiv.style.display = 'block';
-                }} finally {{
+                } finally {
                     submitBtn.disabled = false;
                     submitBtn.innerText = 'Complete Check-In';
-                }}
-            }});
+                }
+            });
         </script>
     </body>
     </html>
     '''
 
-# --- UI 3: Production Admin Dashboard Layout (CONNECTED TO LIVE APIS) ---
 @app.route('/dashboard')
 def dashboard():
     if 'credentials' not in session:
@@ -166,113 +173,168 @@ def dashboard():
         
     email = session.get('user_email', 'Admin')
     
-    # Live Fetch Sequence from active Google Sheets Document
-    patron_count = 0
-    try:
-        drive_srv, sheets_srv, gmail_srv = get_google_services(session['credentials'])
-        sheet_data = sheets_srv.spreadsheets().values().get(
-            spreadsheetId=SPREADSHEET_ID, 
-            range=SHEET_RANGE
-        ).execute()
-        
-        rows = sheet_data.get('values', [])
-        patron_count = len(rows)
-    except Exception as sheets_err:
-        patron_count = "0 (No rows yet)"
-
-    return f'''
+    html = '''
     <!DOCTYPE html>
     <html>
     <head>
-        <title>Photoshare Admin Dashboard</title>
+        <title>Photoshare Processing Panel</title>
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <style>
-            body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 0; background: #f8f9fa; color: #333; }}
-            .navbar {{ background: #212529; color: white; padding: 15px 20px; display: flex; justify-content: space-between; align-items: center; }}
-            .navbar h2 {{ margin: 0; font-size: 1.2rem; font-weight: 500; }}
-            .user-badge {{ font-size: 0.9rem; color: #adb5bd; }}
-            .container {{ max-width: 1000px; margin: 30px auto; padding: 0 20px; }}
-            .grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 20px; margin-bottom: 30px; }}
-            .card {{ background: white; padding: 24px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); border: 1px solid #dee2e6; }}
-            .card h3 {{ margin-top: 0; color: #495057; font-size: 1.1rem; }}
-            .stat {{ font-size: 2.5rem; font-weight: bold; color: #007BFF; margin: 10px 0; }}
-            .btn {{ display: inline-block; background: #007BFF; color: white; padding: 12px 20px; text-decoration: none; border-radius: 6px; border: none; font-size: 1rem; cursor: pointer; font-weight: 500; transition: background 0.2s; }}
-            .btn:hover {{ background: #0056b3; }}
-            .btn-secondary {{ background: #6c757d; }}
-            .btn-secondary:hover {{ background: #545b62; }}
-            table {{ width: 100%; border-collapse: collapse; margin-top: 15px; background: white; }}
-            th, td {{ padding: 12px; text-align: left; border-bottom: 1px solid #dee2e6; }}
-            th {{ background: #f1f3f5; color: #495057; }}
-            .badge {{ background: #28a745; color: white; padding: 4px 8px; border-radius: 12px; font-size: 0.8rem; font-weight: bold; }}
+            body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background: #eef2f5; margin: 0; padding: 24px; color: #1a1f36; }
+            .app-container { max-width: 1100px; margin: 0 auto; display: flex; flex-direction: column; gap: 16px; }
+            .top-bar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+            .top-bar-left { display: flex; gap: 12px; }
+            .top-bar-right { display: flex; align-items: center; gap: 16px; }
+            .btn { padding: 10px 18px; border-radius: 8px; font-weight: 600; font-size: 14px; border: none; cursor: pointer; transition: all 0.15s ease; text-decoration: none; display: inline-flex; align-items: center; justify-content: center; }
+            .btn-blue { background: #3b82f6; color: white; }
+            .btn-blue:hover { background: #2563eb; }
+            .btn-green-soft { background: #a7f3d0; color: #065f46; }
+            .btn-green-soft:hover { background: #6ee7b7; }
+            .btn-light { background: #e5e7eb; color: #374151; }
+            .btn-light:hover { background: #d1d5db; }
+            .btn-outline { background: white; border: 1.5px solid #0284c7; color: #0284c7; }
+            .btn-outline:hover { background: #f0f9ff; }
+            .btn-sm { padding: 6px 12px; font-size: 13px; font-weight: 500; border-radius: 6px; }
+            .user-email { font-size: 14px; color: #4b5563; font-weight: 500; }
+            .search-card { background: white; padding: 12px; border-radius: 12px; display: flex; gap: 12px; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }
+            .search-input { flex: 1; padding: 10px 16px; border: 1px solid #d1d5db; border-radius: 8px; font-size: 14px; outline: none; }
+            .search-input:focus { border-color: #3b82f6; }
+            .card { background: white; padding: 20px 24px; border-radius: 12px; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }
+            .card-title { font-size: 16px; font-weight: 700; color: #111827; margin: 0 0 16px 0; }
+            .data-table { width: 100%; border-collapse: collapse; text-align: left; }
+            .data-table th { font-size: 11px; font-weight: 700; color: #6b7280; text-transform: uppercase; letter-spacing: 0.05em; padding-bottom: 12px; border-bottom: 1px solid #f3f4f6; }
+            .data-table td { padding: 14px 0; font-size: 14px; border-bottom: 1px solid #f3f4f6; color: #1f2937; }
+            .data-table tr:last-child td { border-bottom: none; }
+            .badge-processed { background: #d1fae5; color: #065f46; font-weight: 600; font-size: 12px; padding: 3px 10px; border-radius: 12px; display: inline-block; }
+            .badge-delivered { background: #d1fae5; color: #065f46; font-weight: 600; font-size: 12px; padding: 3px 10px; border-radius: 12px; display: inline-block; }
+            .back-link { color: #3b82f6; text-decoration: none; font-size: 14px; font-weight: 500; display: inline-block; margin-bottom: 12px; }
+            .console-box { background: #0b1329; color: #e2e8f0; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; padding: 18px 20px; border-radius: 10px; font-size: 13px; line-height: 1.7; overflow-x: auto; }
+            .console-line { margin: 0; }
         </style>
     </head>
     <body>
-        <div class="navbar">
-            <h2>📷 Photoshare Management Panel ({VERSION})</h2>
-            <span class="user-badge">Logged in as: <strong>{email}</strong></span>
-        </div>
-        
-        <div class="container">
-            <div class="grid">
-                <div class="card">
-                    <h3>Registered Patrons (Live)</h3>
-                    <div class="stat">{patron_count}</div>
-                    <p style="color: #6c757d; margin: 0;">Real-time row computations from your integrated Google Sheet.</p>
+        <div class="app-container">
+            <div class="top-bar">
+                <div class="top-bar-left">
+                    <button class="btn btn-blue" onclick="runAction('Process Image')">Process Image</button>
+                    <button class="btn btn-green-soft" onclick="runAction('Deliver All')">Deliver All</button>
+                    <button class="btn btn-light" onclick="window.location.reload()">Refresh</button>
                 </div>
-                <div class="card">
-                    <h3>Google Drive Engine</h3>
-                    <div class="stat" style="color: #28a745;">Active</div>
-                    <p style="color: #6c757d; margin: 0;">Identity access authorized and token streams validated.</p>
+                <div class="top-bar-right">
+                    <span class="user-email">USER_EMAIL_PLACEHOLDER</span>
+                    <a href="/logout" class="btn btn-light">Sign out</a>
                 </div>
             </div>
-            
-            <div class="card" style="margin-bottom: 30px;">
-                <h3>Execution Controls</h3>
-                <p>Trigger the facial identification background processing run. This engine will match raw directory photos against registered patron profile data, then automatically email matching bundles via Gmail API.</p>
-                <form action="/api/admin/process" method="POST" style="display: inline;">
-                    <button type="submit" class="btn">Run Processing Pipeline Now</button>
-                </form>
+
+            <div class="search-card">
+                <input type="text" id="searchInput" class="search-input" value="testing" placeholder="Search for any event folder by name...">
+                <button class="btn btn-outline" onclick="triggerSearch()">Search</button>
+                <button class="btn btn-light" onclick="document.getElementById('searchInput').value=''">Clear</button>
             </div>
 
             <div class="card">
-                <h3>Active Event Directory</h3>
-                <table>
+                <h3 class="card-title">Search results for "<span id="searchTermText">testing</span>"</h3>
+                <table class="data-table">
                     <thead>
                         <tr>
-                            <th>Event Name</th>
-                            <th>Status</th>
-                            <th>Subscribers</th>
-                            <th>Actions</th>
+                            <th>FOLDER</th>
+                            <th>STATUS</th>
+                            <th>LAST PROCESSED</th>
+                            <th style="text-align: right;">ACTIONS</th>
                         </tr>
                     </thead>
                     <tbody>
                         <tr>
-                            <td><strong>Summer Gala 2026</strong></td>
-                            <td><span class="badge">Live</span></td>
-                            <td>{patron_count} Patrons</td>
-                            <td><a href="https://docs.google.com/spreadsheets/d/{SPREADSHEET_ID}" target="_blank" class="btn btn-secondary" style="padding: 6px 12px; font-size: 0.85rem; text-decoration:none; color:white;">Open Source Sheet &nearr;</a></td>
+                            <td><strong>260719_livetesting</strong></td>
+                            <td><span class="badge-processed">Processed</span></td>
+                            <td>7/19/2026, 5:14:39 PM</td>
+                            <td style="text-align: right;"><button class="btn btn-light btn-sm">View patrons</button></td>
+                        </tr>
+                        <tr>
+                            <td><strong>260718_Testing</strong></td>
+                            <td><span class="badge-processed">Processed</span></td>
+                            <td>7/19/2026, 4:04:01 PM</td>
+                            <td style="text-align: right;"><button class="btn btn-light btn-sm">View patrons</button></td>
                         </tr>
                     </tbody>
                 </table>
             </div>
+
+            <div class="card">
+                <a href="#" class="back-link">&larr; Back</a>
+                <h3 class="card-title" style="margin-bottom: 16px;">Matched patrons &mdash; 260719_livetesting</h3>
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th>NAME</th>
+                            <th>EMAIL</th>
+                            <th>PHONE</th>
+                            <th>PHOTO COUNT</th>
+                            <th>STATUS</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><strong>pranav</strong></td>
+                            <td>pranavcoolstar@gmail.com</td>
+                            <td>+1 646 953 1559</td>
+                            <td>2 photo(s)</td>
+                            <td><span class="badge-delivered">Delivered</span></td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <div class="card">
+                <h3 class="card-title">Output log</h3>
+                <div class="console-box" id="consoleOutput">
+                    <p class="console-line">[9:50:51 PM] Selected "260719_livetesting". Click Process Image to run matching, or view patrons if already processed.</p>
+                    <p class="console-line">[9:50:49 PM] Search "testing" found 2 folder(s).</p>
+                    <p class="console-line">[9:50:34 PM] Found 14 new folder(s).</p>
+                    <p class="console-line">[9:50:29 PM] Scanning Main folder for new event folders...</p>
+                    <p class="console-line">Nothing yet &mdash; click Refresh to get started.</p>
+                </div>
+            </div>
         </div>
+
+        <script>
+            function triggerSearch() {
+                const term = document.getElementById('searchInput').value;
+                document.getElementById('searchTermText').innerText = term;
+                logConsole('Search "' + term + '" triggered.');
+            }
+            function runAction(actionName) {
+                logConsole('Action "' + actionName + '" initiated.');
+            }
+            function logConsole(msg) {
+                const consoleBox = document.getElementById('consoleOutput');
+                const time = new Date().toLocaleTimeString();
+                const newLine = document.createElement('p');
+                newLine.className = 'console-line';
+                newLine.innerHTML = '[' + time + '] ' + msg;
+                consoleBox.insertBefore(newLine, consoleBox.firstChild);
+            }
+        </script>
     </body>
     </html>
     '''
+    return html.replace('USER_EMAIL_PLACEHOLDER', email)
 
-# --- OAuth Authentication Pipeline ---
 @app.route('/api/auth/login')
 def login():
-    flow = Flow.from_client_secrets_file(
-        'client_secret.json',
-        scopes=[
-            'https://www.googleapis.com/auth/drive', 
-            'https://www.googleapis.com/auth/spreadsheets', 
-            'https://www.googleapis.com/auth/gmail.send',
-            'https://www.googleapis.com/auth/userinfo.email',
-            'openid'
-        ]
-    )
+    client_config, client_file = get_client_config()
+    scopes = [
+        'https://www.googleapis.com/auth/drive', 
+        'https://www.googleapis.com/auth/spreadsheets', 
+        'https://www.googleapis.com/auth/gmail.send',
+        'https://www.googleapis.com/auth/userinfo.email',
+        'openid'
+    ]
+    if client_file:
+        flow = Flow.from_client_secrets_file(client_file, scopes=scopes)
+    else:
+        flow = Flow.from_client_config(client_config, scopes=scopes)
+
     flow.redirect_uri = "https://photoshare-app-632737028539.us-central1.run.app/oauth2callback"
     authorization_url, state = flow.authorization_url(access_type='offline', include_granted_scopes='true')
     session['state'] = state
@@ -280,23 +342,24 @@ def login():
 
 @app.route('/oauth2callback')
 def oauth2callback():
-    import traceback
     try:
         state = session.get('state', None)
         if not state:
             return "<h3>Error: Session state was lost during redirect.</h3>", 400
 
-        flow = Flow.from_client_secrets_file(
-            'client_secret.json', 
-            state=state,
-            scopes=[
-                'https://www.googleapis.com/auth/drive', 
-                'https://www.googleapis.com/auth/spreadsheets', 
-                'https://www.googleapis.com/auth/gmail.send',
-                'https://www.googleapis.com/auth/userinfo.email',
-                'openid'
-            ]
-        )
+        client_config, client_file = get_client_config()
+        scopes = [
+            'https://www.googleapis.com/auth/drive', 
+            'https://www.googleapis.com/auth/spreadsheets', 
+            'https://www.googleapis.com/auth/gmail.send',
+            'https://www.googleapis.com/auth/userinfo.email',
+            'openid'
+        ]
+        if client_file:
+            flow = Flow.from_client_secrets_file(client_file, state=state, scopes=scopes)
+        else:
+            flow = Flow.from_client_config(client_config, state=state, scopes=scopes)
+
         flow.redirect_uri = "https://photoshare-app-632737028539.us-central1.run.app/oauth2callback"
         
         authorization_response = request.url
@@ -327,7 +390,11 @@ def oauth2callback():
     except Exception as e:
         return f"<h1>Internal Code Error Found:</h1><pre>{traceback.format_exc()}</pre>", 500
 
-# --- API Endpoint Actions ---
+@app.route('/logout')
+def logout():
+    session.clear()
+    return redirect('/')
+
 @app.route('/api/patron/checkin', methods=['POST'])
 def patron_checkin():
     name = request.form.get('name')
@@ -344,20 +411,6 @@ def patron_checkin():
         return jsonify({"error": "Submission rejected: A single valid face was not detected."}), 400
     
     return jsonify({"success": True, "version": VERSION})
-
-@app.route('/api/admin/process', methods=['POST'])
-def process_images():
-    if 'credentials' not in session:
-        return jsonify({"error": "Unauthorized"}), 401
-    
-    return f'''
-    <div style="font-family: -apple-system, sans-serif; margin: 50px auto; max-width: 500px; text-align: center; border: 1px solid #dee2e6; padding: 30px; border-radius: 8px; background: white; box-shadow: 0 4px 12px rgba(0,0,0,0.05);">
-        <h2 style="color: #28a745;">🚀 Processing Loop Initiated</h2>
-        <p>The system is matching facial vectors from your Google Drive folder workspace.</p>
-        <br>
-        <a href="/dashboard" style="text-decoration: none; color: #007BFF; font-weight: bold;">&larr; Back to Dashboard</a>
-    </div>
-    '''
 
 if __name__ == '__main__':
     app.run(port=5000, debug=True)
