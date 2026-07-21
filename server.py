@@ -8,12 +8,11 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 
-# --- Configuration ---
 VERSION = "v2"
 ALLOWED_USERS = ["pranavcoolstar@gmail.com", "makwanapranav26@gmail.com"]
 
 SPREADSHEET_ID = "1gWWBNpKU1lIEz7RCiCycIqvg_QJKARqPJHbpIr78RvE"
-PHOTOZ_FOLDER_NAME = "Photoz"
+TARGET_DRIVE_FOLDER_ID = "1FBhdmP9xzKnD8-aCx5aJIV3jcgoujWIm"
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", "super_secret_dev_key")
@@ -47,7 +46,6 @@ def get_google_services(creds_dict):
     gmail_service = build('gmail', 'v1', credentials=creds)
     return drive_service, sheets_service, gmail_service
 
-# --- UI 1: Root Portal ---
 @app.route('/')
 def home():
     return f'''
@@ -77,7 +75,6 @@ def home():
     </html>
     '''
 
-# --- UI 2: Check-In Form ---
 @app.route('/checkin')
 def checkin_form():
     return '''
@@ -138,7 +135,6 @@ def checkin_form():
     </html>
     '''
 
-# --- UI 3: Operations Dashboard with Multi-Grid Management ---
 @app.route('/dashboard')
 def dashboard():
     if 'credentials' not in session:
@@ -200,9 +196,8 @@ def dashboard():
                 </div>
             </div>
 
-            <!-- Grid 1: Event Folders -->
             <div class="card">
-                <div class="card-title">Grid 1: Event Folders (My Drive &rarr; Photoz)</div>
+                <div class="card-title">Grid 1: Event Folders (Mapped Folder ID: 1FBhdmP9xzKnD8-aCx5aJIV3jcgoujWIm)</div>
                 <input type="text" id="folderSearchInput" class="search-input" onkeyup="filterGrid1()" placeholder="Search event folders by name...">
                 <div class="table-container">
                     <table class="data-table">
@@ -214,13 +209,12 @@ def dashboard():
                             </tr>
                         </thead>
                         <tbody id="grid1Body">
-                            <tr><td colspan="3">Loading event directories...</td></tr>
+                            <tr><td colspan="3">Loading mapped drive directory...</td></tr>
                         </tbody>
                     </table>
                 </div>
             </div>
 
-            <!-- Grid 2: Matched Patrons in an Event -->
             <div class="card">
                 <div class="card-title">
                     <span>Grid 2: Matched Patrons <span id="selectedFolderTitle" style="color: #3b82f6; font-weight: normal;">(Select a folder above)</span></span>
@@ -243,7 +237,6 @@ def dashboard():
                 </div>
             </div>
 
-            <!-- Output Log Console -->
             <div class="card">
                 <div class="card-title" style="margin-bottom: 8px;">Output Log</div>
                 <div class="console-box" id="consoleOutput">
@@ -257,7 +250,7 @@ def dashboard():
             let currentSelectedFolder = null;
 
             async function loadGrid1Folders() {
-                logConsole('Fetching folders from My Drive -> Photoz...');
+                logConsole('Fetching subfolders from mapped Drive folder...');
                 try {
                     const res = await fetch('/api/admin/folders');
                     const data = await res.json();
@@ -274,7 +267,7 @@ def dashboard():
             function renderGrid1(folders) {
                 const tbody = document.getElementById('grid1Body');
                 if (folders.length === 0) {
-                    tbody.innerHTML = '<tr><td colspan="3">No folders found inside Photoz.</td></tr>';
+                    tbody.innerHTML = '<tr><td colspan="3">No subfolders found inside target Drive folder.</td></tr>';
                     return;
                 }
 
@@ -315,7 +308,6 @@ def dashboard():
                     
                     const patrons = data.patrons || [];
                     
-                    // Enable/Disable Button 2
                     document.getElementById('btnShareAll').disabled = (patrons.length === 0);
 
                     if (patrons.length === 0) {
@@ -413,7 +405,6 @@ def dashboard():
                 return (str || '').replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
             }
 
-            // Initial load
             loadGrid1Folders();
         </script>
     </body>
@@ -421,7 +412,6 @@ def dashboard():
     '''
     return html.replace('USER_EMAIL_PLACEHOLDER', email)
 
-# --- OAuth Authorization ---
 @app.route('/api/auth/login')
 def login():
     client_config, client_file = get_client_config()
@@ -497,7 +487,6 @@ def logout():
     session.clear()
     return redirect('/')
 
-# --- Grid 1 Backend API: Get Photoz Event Folders ---
 @app.route('/api/admin/folders')
 def api_get_folders():
     if 'credentials' not in session:
@@ -506,19 +495,19 @@ def api_get_folders():
     try:
         drive_srv, sheets_srv, _ = get_google_services(session['credentials'])
         
-        # 1. Locate root 'Photoz' folder
-        root_query = "name = 'Photoz' and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
-        root_res = drive_srv.files().list(q=root_query, fields="files(id, name)").execute()
-        root_files = root_res.get('files', [])
+        try:
+            root_folder = drive_srv.files().get(fileId=TARGET_DRIVE_FOLDER_ID, fields="id, name").execute()
+        except Exception as err:
+            return jsonify({"error": f"Unable to access Drive Folder ID ({TARGET_DRIVE_FOLDER_ID}). Verify permissions or ID. Details: {str(err)}"}), 400
+
+        photoz_id = root_folder['id']
         
-        if not root_files:
-            return jsonify({"folders": []})
-            
-        photoz_id = root_files[0]['id']
-        
-        # 2. Get event subfolders inside Photoz
         sub_query = f"'{photoz_id}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
-        sub_res = drive_srv.files().list(q=sub_query, fields="files(id, name, createdTime)", orderBy="createdTime desc").execute()
+        sub_res = drive_srv.files().list(
+            q=sub_query, 
+            fields="files(id, name, createdTime)", 
+            orderBy="createdTime desc"
+        ).execute()
         event_folders = sub_res.get('files', [])
         
         results = []
@@ -526,17 +515,14 @@ def api_get_folders():
             folder_id = f['id']
             folder_name = f['name']
             
-            # Count photo files inside event folder
             file_query = f"'{folder_id}' in parents and mimeType contains 'image/' and trashed = false"
             file_res = drive_srv.files().list(q=file_query, fields="files(id)").execute()
             photo_count = len(file_res.get('files', []))
             
-            # Retrieve count of identified patrons from sheets
             patron_count = 0
             try:
                 sheet_data = sheets_srv.spreadsheets().values().get(spreadsheetId=SPREADSHEET_ID, range="matchedfaces!A2:E").execute()
                 rows = sheet_data.get('values', [])
-                # Count distinct patrons matched to this folder_id
                 matched_patrons = set(r[1] for r in rows if len(r) >= 2 and r[0] == folder_id)
                 patron_count = len(matched_patrons)
             except Exception:
@@ -553,7 +539,6 @@ def api_get_folders():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# --- Grid 2 Backend API: Get Matched Patrons for a Folder ---
 @app.route('/api/admin/matched-patrons')
 def api_matched_patrons():
     if 'credentials' not in session:
@@ -566,19 +551,15 @@ def api_matched_patrons():
     try:
         _, sheets_srv, _ = get_google_services(session['credentials'])
         
-        # Read matchedfaces sheet
         matched_data = sheets_srv.spreadsheets().values().get(spreadsheetId=SPREADSHEET_ID, range="matchedfaces!A2:E").execute().get('values', [])
-        # Read patroncontact sheet
         patron_data = sheets_srv.spreadsheets().values().get(spreadsheetId=SPREADSHEET_ID, range="Sheet1!A2:D").execute().get('values', [])
         
-        # Build patron details lookup dict
         patron_dict = {}
         for row in patron_data:
             if len(row) >= 3:
                 p_name, p_email, p_phone = row[0], row[1], row[2]
                 patron_dict[p_email] = {"name": p_name, "email": p_email, "phone": p_phone}
 
-        # Count matched photos per patron in this folder
         patron_photo_counts = {}
         for m in matched_data:
             if len(m) >= 2 and m[0] == folder_id:
@@ -599,7 +580,6 @@ def api_matched_patrons():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# --- Button 1 Backend API: Process Image ---
 @app.route('/api/admin/process-folder', methods=['POST'])
 def api_process_folder():
     if 'credentials' not in session:
@@ -613,20 +593,16 @@ def api_process_folder():
     try:
         drive_srv, sheets_srv, _ = get_google_services(session['credentials'])
         
-        # 1. Fetch images from folder
         files_res = drive_srv.files().list(q=f"'{folder_id}' in parents and mimeType contains 'image/' and trashed = false", fields="files(id, name, webViewLink)").execute()
         image_files = files_res.get('files', [])
         
-        # 2. Fetch patron contacts
         patron_rows = sheets_srv.spreadsheets().values().get(spreadsheetId=SPREADSHEET_ID, range="Sheet1!A2:D").execute().get('values', [])
         
         new_matches = []
         for img in image_files:
-            # Generate simulated facial vector comparison against patrons
             for p in patron_rows:
                 if len(p) >= 2:
                     p_email = p[1]
-                    # Append new match record to sheet: [folder_id, patron_email, file_id, file_link, timestamp]
                     new_matches.append([folder_id, p_email, img['id'], img.get('webViewLink', ''), datetime.utcnow().isoformat()])
 
         if new_matches:
@@ -641,7 +617,6 @@ def api_process_folder():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# --- Button 2 & Single Share APIs ---
 @app.route('/api/admin/share-single', methods=['POST'])
 def api_share_single():
     if 'credentials' not in session:
@@ -673,4 +648,3 @@ def patron_checkin():
 
 if __name__ == '__main__':
     app.run(port=5000, debug=True)
-
