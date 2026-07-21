@@ -9,7 +9,8 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 
-VERSION = "v2"
+# --- Configuration ---
+VERSION = "v3"
 ALLOWED_USERS = ["pranavcoolstar@gmail.com", "makwanapranav26@gmail.com"]
 
 SPREADSHEET_ID = "1gWWBNpKU1lIEz7RCiCycIqvg_QJKARqPJHbpIr78RvE"
@@ -23,6 +24,8 @@ app.config.update(
     SESSION_COOKIE_SAMESITE='None',
 )
 
+system_creds_cache = None
+
 @app.errorhandler(500)
 def handle_500_error(e):
     return f"<h1>500 Internal Server Error (Diagnostic Catch)</h1><pre>{traceback.format_exc()}</pre>", 500
@@ -33,7 +36,6 @@ def get_client_config():
             return json.load(f), 'client_secret.json'
     env_secrets = os.environ.get('CLIENT_SECRET_JSON')
     if env_secrets:
-        # Try base64 decode first, fallback to raw string
         try:
             decoded = base64.b64decode(env_secrets).decode('utf-8')
             return json.loads(decoded), None
@@ -59,6 +61,7 @@ def get_google_services(creds_dict):
     gmail_service = build('gmail', 'v1', credentials=creds)
     return drive_service, sheets_service, gmail_service
 
+# --- UI 1: Root Portal ---
 @app.route('/')
 def home():
     return f'''
@@ -88,6 +91,7 @@ def home():
     </html>
     '''
 
+# --- UI 2: Public Check-In Form ---
 @app.route('/checkin')
 def checkin_form():
     return '''
@@ -148,6 +152,7 @@ def checkin_form():
     </html>
     '''
 
+# --- UI 3: Operations Dashboard ---
 @app.route('/dashboard')
 def dashboard():
     if 'credentials' not in session:
@@ -425,6 +430,7 @@ def dashboard():
     '''
     return html.replace('USER_EMAIL_PLACEHOLDER', email)
 
+# --- OAuth Authorization ---
 @app.route('/api/auth/login')
 def login():
     client_config, client_file = get_client_config()
@@ -451,6 +457,7 @@ def login():
 
 @app.route('/oauth2callback')
 def oauth2callback():
+    global system_creds_cache
     try:
         state = session.get('state', None)
         if not state:
@@ -485,7 +492,7 @@ def oauth2callback():
         if email not in ALLOWED_USERS:
             return f"403 Forbidden: Identity Unauthorized ({email})", 403
 
-        session['credentials'] = {
+        creds_dict = {
             'token': creds.token,
             'refresh_token': creds.refresh_token,
             'token_uri': creds.token_uri,
@@ -493,7 +500,11 @@ def oauth2callback():
             'client_secret': creds.client_secret,
             'scopes': creds.scopes
         }
+        
+        session['credentials'] = creds_dict
         session['user_email'] = email
+        system_creds_cache = creds_dict
+        
         return redirect('/dashboard')
 
     except Exception as e:
@@ -504,6 +515,45 @@ def logout():
     session.clear()
     return redirect('/')
 
+# --- Public Guest Check-in Endpoint ---
+@app.route('/api/patron/checkin', methods=['POST'])
+def patron_checkin():
+    global system_creds_cache
+    name = request.form.get('name')
+    email = request.form.get('email')
+    phone = request.form.get('phone')
+    selfie_file = request.files.get('selfie')
+
+    if not name or not email or not phone or not selfie_file:
+        return jsonify({"error": "Missing mandatory fields"}), 400
+
+    img_bytes = selfie_file.read()
+    embedding = extract_face_embedding(img_bytes)
+    if embedding is None:
+        return jsonify({"error": "Submission rejected: Face not detected."}), 400
+
+    creds_to_use = session.get('credentials') or system_creds_cache
+    
+    if not creds_to_use:
+        return jsonify({"error": "Server not authenticated with Google Sheets yet. Admin must log in once at /api/auth/login to authorize guest check-ins."}), 503
+
+    try:
+        _, sheets_srv, _ = get_google_services(creds_to_use)
+        
+        new_row = [[name, email, phone, datetime.utcnow().isoformat()]]
+        
+        sheets_srv.spreadsheets().values().append(
+            spreadsheetId=SPREADSHEET_ID,
+            range="Sheet1!A:D",
+            valueInputOption="USER_ENTERED",
+            body={"values": new_row}
+        ).execute()
+
+        return jsonify({"success": True, "version": VERSION})
+    except Exception as e:
+        return jsonify({"error": f"Failed to append to Google Sheets: {str(e)}"}), 500
+
+# --- Grid 1 Backend API ---
 @app.route('/api/admin/folders')
 def api_get_folders():
     if 'credentials' not in session:
@@ -515,7 +565,7 @@ def api_get_folders():
         try:
             root_folder = drive_srv.files().get(fileId=TARGET_DRIVE_FOLDER_ID, fields="id, name").execute()
         except Exception as err:
-            return jsonify({"error": f"Unable to access Drive Folder ID ({TARGET_DRIVE_FOLDER_ID}). Verify permissions or ID. Details: {str(err)}"}), 400
+            return jsonify({"error": f"Unable to access Drive Folder ID ({TARGET_DRIVE_FOLDER_ID}). Details: {str(err)}"}), 400
 
         photoz_id = root_folder['id']
         
@@ -556,6 +606,7 @@ def api_get_folders():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+# --- Grid 2 Backend API ---
 @app.route('/api/admin/matched-patrons')
 def api_matched_patrons():
     if 'credentials' not in session:
@@ -597,6 +648,7 @@ def api_matched_patrons():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+# --- Button 1 Backend API: Process Image ---
 @app.route('/api/admin/process-folder', methods=['POST'])
 def api_process_folder():
     if 'credentials' not in session:
@@ -634,6 +686,7 @@ def api_process_folder():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+# --- Button 2 & Single Share APIs ---
 @app.route('/api/admin/share-single', methods=['POST'])
 def api_share_single():
     if 'credentials' not in session:
@@ -645,23 +698,6 @@ def api_share_all():
     if 'credentials' not in session:
         return jsonify({"error": "Unauthorized"}), 401
     return jsonify({"success": True, "sent_count": 1})
-
-@app.route('/api/patron/checkin', methods=['POST'])
-def patron_checkin():
-    name = request.form.get('name')
-    email = request.form.get('email')
-    phone = request.form.get('phone')
-    selfie_file = request.files.get('selfie')
-
-    if not name or not email or not phone or not selfie_file:
-        return jsonify({"error": "Missing mandatory fields"}), 400
-
-    img_bytes = selfie_file.read()
-    embedding = extract_face_embedding(img_bytes)
-    if embedding is None:
-        return jsonify({"error": "Submission rejected: Face not detected."}), 400
-    
-    return jsonify({"success": True, "version": VERSION})
 
 if __name__ == '__main__':
     app.run(port=5000, debug=True)
