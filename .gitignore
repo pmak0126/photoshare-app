@@ -2,3 +2,12 @@ client_secret.json
 *.pyc
 __pycache__/
 .env
+.npm/
+.docker/
+.config/
+.gemini/
+.bash*
+.profile
+.sudo_as_admin_successful
+README-cloudshell.txt
+nano
