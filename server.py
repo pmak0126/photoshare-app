@@ -5,6 +5,8 @@ import io
 import numpy as np
 import traceback
 from datetime import datetime
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 from flask import Flask, request, jsonify, redirect, session, url_for
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
@@ -69,6 +71,31 @@ def get_google_services(creds_dict):
     sheets_service = build("sheets", "v4", credentials=creds)
     gmail_service = build("gmail", "v1", credentials=creds)
     return drive_service, sheets_service, gmail_service
+
+def send_photo_email(gmail_srv, recipient_email, recipient_name, photo_links):
+    message = MIMEMultipart("alternative")
+    message["To"] = recipient_email
+    message["Subject"] = f"📷 Your Photos are Ready, {recipient_name}!"
+
+    links_html = "".join([f'<li><a href="{link}" target="_blank">{link}</a></li>' for link in photo_links])
+    
+    html_content = f"""
+    <html>
+    <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+        <h2>Hello {recipient_name}! 👋</h2>
+        <p>We found <strong>{len(photo_links)} photo(s)</strong> matching your facial recognition check-in from your recent event.</p>
+        <p>Click the links below to view and download your photos directly from Google Drive:</p>
+        <ul>
+            {links_html}
+        </ul>
+        <br>
+        <p>Best regards,<br><strong>Photoshare System Team</strong></p>
+    </body>
+    </html>
+    """
+    message.attach(MIMEText(html_content, "html"))
+    raw_msg = base64.urlsafe_b64encode(message.as_bytes()).decode("utf-8")
+    gmail_srv.users().messages().send(userId="me", body={"raw": raw_msg}).execute()
 
 @app.route("/")
 def home():
@@ -751,13 +778,70 @@ def api_process_folder():
 def api_share_single():
     if "credentials" not in session:
         return jsonify({"error": "Unauthorized"}), 401
-    return jsonify({"success": True, "status": "Email queued"})
+    
+    data = request.get_json() or {}
+    folder_id = data.get("folder_id")
+    target_email = data.get("email")
+
+    if not folder_id or not target_email:
+        return jsonify({"error": "Missing folder_id or email"}), 400
+
+    try:
+        _, sheets_srv, gmail_srv = get_google_services(session["credentials"])
+        
+        res = sheets_srv.spreadsheets().values().get(spreadsheetId=SPREADSHEET_ID, range="matchedfaces!A2:G").execute()
+        rows = res.get("values", [])
+
+        target_row = None
+        for r in rows:
+            if len(r) >= 6 and r[0] == folder_id and r[2] == target_email:
+                target_row = r
+                break
+
+        if not target_row:
+            return jsonify({"error": f"No matched photos found in sheet for {target_email} in folder {folder_id}."}), 404
+
+        name = target_row[1]
+        links = target_row[5].split("\n")
+
+        send_photo_email(gmail_srv, target_email, name, links)
+        return jsonify({"success": True, "status": f"Email successfully dispatched to {target_email}"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 @app.route("/api/admin/share-all", methods=["POST"])
 def api_share_all():
     if "credentials" not in session:
         return jsonify({"error": "Unauthorized"}), 401
-    return jsonify({"success": True, "sent_count": 1})
+
+    data = request.get_json() or {}
+    folder_id = data.get("folder_id")
+
+    if not folder_id:
+        return jsonify({"error": "Missing folder_id"}), 400
+
+    try:
+        _, sheets_srv, gmail_srv = get_google_services(session["credentials"])
+        
+        res = sheets_srv.spreadsheets().values().get(spreadsheetId=SPREADSHEET_ID, range="matchedfaces!A2:G").execute()
+        rows = res.get("values", [])
+
+        sent_count = 0
+        for r in rows:
+            if len(r) >= 6 and r[0] == folder_id:
+                name = r[1]
+                email = r[2]
+                links = r[5].split("\n")
+                
+                try:
+                    send_photo_email(gmail_srv, email, name, links)
+                    sent_count += 1
+                except Exception as mail_err:
+                    print(f"Failed to email {email}: {mail_err}")
+
+        return jsonify({"success": True, "sent_count": sent_count})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
