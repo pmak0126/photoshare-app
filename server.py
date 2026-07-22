@@ -25,7 +25,7 @@ app.secret_key = os.environ.get("FLASK_SECRET_KEY", "super_secret_dev_key")
 app.config.update(
     SESSION_COOKIE_SECURE=True,
     SESSION_COOKIE_HTTPONLY=True,
-    SESSION_COOKIE_SAMESITE="None",
+    SESSION_COOKIE_SAMESITE='None',
 )
 
 system_creds_cache = None
@@ -35,13 +35,13 @@ def handle_500_error(e):
     return f"<h1>500 Internal Server Error (Diagnostic Catch)</h1><pre>{traceback.format_exc()}</pre>", 500
 
 def get_client_config():
-    if os.path.exists("client_secret.json"):
-        with open("client_secret.json", "r") as f:
-            return json.load(f), "client_secret.json"
-    env_secrets = os.environ.get("CLIENT_SECRET_JSON")
+    if os.path.exists('client_secret.json'):
+        with open('client_secret.json', 'r') as f:
+            return json.load(f), 'client_secret.json'
+    env_secrets = os.environ.get('CLIENT_SECRET_JSON')
     if env_secrets:
         try:
-            decoded = base64.b64decode(env_secrets).decode("utf-8")
+            decoded = base64.b64decode(env_secrets).decode('utf-8')
             return json.loads(decoded), None
         except Exception:
             return json.loads(env_secrets), None
@@ -50,7 +50,7 @@ def get_client_config():
 def extract_face_embeddings(image_bytes):
     try:
         image = Image.open(io.BytesIO(image_bytes))
-        image = image.convert("RGB")
+        image = image.convert('RGB')
         image.thumbnail((1000, 1000))
         np_img = np.array(image)
         encodings = face_recognition.face_encodings(np_img)
@@ -61,15 +61,15 @@ def extract_face_embeddings(image_bytes):
 
 def get_google_services(creds_dict):
     client_config, _ = get_client_config()
-    if client_config and "web" in client_config:
-        creds_dict["client_id"] = client_config["web"]["client_id"]
-        creds_dict["client_secret"] = client_config["web"]["client_secret"]
-        creds_dict["token_uri"] = client_config["web"].get("token_uri", "https://oauth2.googleapis.com/token")
+    if client_config and 'web' in client_config:
+        creds_dict['client_id'] = client_config['web']['client_id']
+        creds_dict['client_secret'] = client_config['web']['client_secret']
+        creds_dict['token_uri'] = client_config['web'].get('token_uri', 'https://oauth2.googleapis.com/token')
 
     creds = Credentials.from_authorized_user_info(creds_dict)
-    drive_service = build("drive", "v3", credentials=creds)
-    sheets_service = build("sheets", "v4", credentials=creds)
-    gmail_service = build("gmail", "v1", credentials=creds)
+    drive_service = build('drive', 'v3', credentials=creds)
+    sheets_service = build('sheets', 'v4', credentials=creds)
+    gmail_service = build('gmail', 'v1', credentials=creds)
     return drive_service, sheets_service, gmail_service
 
 def send_photo_email(gmail_srv, recipient_email, recipient_name, photo_links):
@@ -78,12 +78,13 @@ def send_photo_email(gmail_srv, recipient_email, recipient_name, photo_links):
     message["Subject"] = f"📷 Your Photos are Ready, {recipient_name}!"
 
     links_html = "".join([f'<li><a href="{link}" target="_blank">{link}</a></li>' for link in photo_links])
+    count = len(photo_links)
     
     html_content = f"""
     <html>
     <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
         <h2>Hello {recipient_name}! 👋</h2>
-        <p>We found <strong>{len(photo_links)} photo(s)</strong> matching your facial recognition check-in from your recent event.</p>
+        <p>We found <strong>{count} photo(s)</strong> matching your facial recognition check-in from your recent event.</p>
         <p>Click the links below to view and download your photos directly from Google Drive:</p>
         <ul>
             {links_html}
@@ -97,9 +98,9 @@ def send_photo_email(gmail_srv, recipient_email, recipient_name, photo_links):
     raw_msg = base64.urlsafe_b64encode(message.as_bytes()).decode("utf-8")
     gmail_srv.users().messages().send(userId="me", body={"raw": raw_msg}).execute()
 
-@app.route("/")
+@app.route('/')
 def home():
-    return f"""
+    return f'''
     <!DOCTYPE html>
     <html>
     <head>
@@ -124,11 +125,11 @@ def home():
         </div>
     </body>
     </html>
-    """
+    '''
 
-@app.route("/checkin")
+@app.route('/checkin')
 def checkin_form():
-    return """
+    return '''
     <!DOCTYPE html>
     <html>
     <head>
@@ -160,40 +161,40 @@ def checkin_form():
             <div id="message"></div>
         </div>
         <script>
-            document.getElementById("checkinForm").addEventListener("submit", async function(e) {
+            document.getElementById('checkinForm').addEventListener('submit', async function(e) {
                 e.preventDefault();
-                const submitBtn = document.getElementById("submitBtn");
-                const messageDiv = document.getElementById("message");
+                const submitBtn = document.getElementById('submitBtn');
+                const messageDiv = document.getElementById('message');
                 submitBtn.disabled = true;
                 const formData = new FormData(this);
                 try {
-                    const response = await fetch("/api/patron/checkin", { method: "POST", body: formData });
+                    const response = await fetch('/api/patron/checkin', { method: 'POST', body: formData });
                     const result = await response.json();
                     if (response.ok && result.success) {
-                        messageDiv.className = "success";
-                        messageDiv.innerHTML = "🎉 Check-in logged successfully with face encoding!";
-                        messageDiv.style.display = "block";
+                        messageDiv.className = 'success';
+                        messageDiv.innerHTML = '🎉 Check-in logged successfully with face encoding!';
+                        messageDiv.style.display = 'block';
                         this.reset();
-                    } else { throw new Error(result.error || "Server error"); }
+                    } else { throw new Error(result.error || 'Server error'); }
                 } catch (err) {
-                    messageDiv.className = "error";
-                    messageDiv.innerHTML = "❌ Error: " + err.message;
-                    messageDiv.style.display = "block";
+                    messageDiv.className = 'error';
+                    messageDiv.innerHTML = '❌ Error: ' + err.message;
+                    messageDiv.style.display = 'block';
                 } finally { submitBtn.disabled = false; }
             });
         </script>
     </body>
     </html>
-    """
+    '''
 
-@app.route("/dashboard")
+@app.route('/dashboard')
 def dashboard():
-    if "credentials" not in session:
-        return "<h3>401 Unauthorized: Please log in first.</h3><a href="/api/auth/login">Login</a>", 401
+    if 'credentials' not in session:
+        return "<h3>401 Unauthorized: Please log in first.</h3><a href='/api/auth/login'>Login</a>", 401
         
-    email = session.get("user_email", "Admin")
+    email = session.get('user_email', 'Admin')
     
-    html = """
+    html = '''
     <!DOCTYPE html>
     <html>
     <head>
@@ -301,38 +302,38 @@ def dashboard():
             let currentSelectedFolder = null;
 
             async function loadGrid1Folders() {
-                logConsole("Fetching subfolders from mapped Drive folder...");
+                logConsole('Fetching subfolders from mapped Drive folder...');
                 try {
-                    const res = await fetch("/api/admin/folders");
+                    const res = await fetch('/api/admin/folders');
                     const data = await res.json();
                     if (data.error) throw new Error(data.error);
                     
                     grid1Folders = data.folders || [];
                     renderGrid1(grid1Folders);
-                    logConsole("Grid 1 updated: Found " + grid1Folders.length + " event folder(s).");
+                    logConsole('Grid 1 updated: Found ' + grid1Folders.length + ' event folder(s).');
                 } catch (err) {
-                    logConsole("ERROR loading Grid 1: " + err.message);
+                    logConsole('ERROR loading Grid 1: ' + err.message);
                 }
             }
 
             function renderGrid1(folders) {
-                const tbody = document.getElementById("grid1Body");
+                const tbody = document.getElementById('grid1Body');
                 if (folders.length === 0) {
-                    tbody.innerHTML = "<tr><td colspan="3">No subfolders found inside target Drive folder.</td></tr>";
+                    tbody.innerHTML = '<tr><td colspan="3">No subfolders found inside target Drive folder.</td></tr>';
                     return;
                 }
 
                 tbody.innerHTML = folders.map(f => `
-                    <tr class="clickable ${currentSelectedFolder && currentSelectedFolder.id === f.id ? "selected" : ""}" onclick="selectFolder("${f.id}", "${escapeHtml(f.name)}", ${f.photoCount}, ${f.patronCount})">
+                    <tr class="clickable ${currentSelectedFolder && currentSelectedFolder.id === f.id ? 'selected' : ''}" onclick="selectFolder('${f.id}', '${escapeHtml(f.name)}', ${f.photoCount}, ${f.patronCount})">
                         <td><strong>${escapeHtml(f.name)}</strong></td>
                         <td>${f.photoCount} photo(s)</td>
                         <td>${f.patronCount} patron(s)</td>
                     </tr>
-                `).join("");
+                `).join('');
             }
 
             function filterGrid1() {
-                const query = document.getElementById("folderSearchInput").value.toLowerCase();
+                const query = document.getElementById('folderSearchInput').value.toLowerCase();
                 const filtered = grid1Folders.filter(f => f.name.toLowerCase().includes(query));
                 renderGrid1(filtered);
             }
@@ -341,16 +342,16 @@ def dashboard():
                 currentSelectedFolder = { id: folderId, name: folderName, photoCount, patronCount };
                 
                 renderGrid1(grid1Folders);
-                document.getElementById("selectedFolderTitle").innerText = "— " + folderName;
-                document.getElementById("btnProcessImage").disabled = false;
+                document.getElementById('selectedFolderTitle').innerText = '— ' + folderName;
+                document.getElementById('btnProcessImage').disabled = false;
                 
                 logConsole(`Selected event folder "${folderName}". Loading matched patrons...`);
                 await loadGrid2Patrons(folderId);
             }
 
             async function loadGrid2Patrons(folderId) {
-                const tbody = document.getElementById("grid2Body");
-                tbody.innerHTML = "<tr><td colspan="5">Loading matched patrons...</td></tr>";
+                const tbody = document.getElementById('grid2Body');
+                tbody.innerHTML = '<tr><td colspan="5">Loading matched patrons...</td></tr>';
                 
                 try {
                     const res = await fetch(`/api/admin/matched-patrons?folder_id=${folderId}`);
@@ -359,10 +360,10 @@ def dashboard():
                     
                     const patrons = data.patrons || [];
                     
-                    document.getElementById("btnShareAll").disabled = (patrons.length === 0);
+                    document.getElementById('btnShareAll').disabled = (patrons.length === 0);
 
                     if (patrons.length === 0) {
-                        tbody.innerHTML = "<tr><td colspan="5" style="color: #6b7280;">No patrons matched for this folder yet. Click "Process Image" to run facial recognition.</td></tr>";
+                        tbody.innerHTML = '<tr><td colspan="5" style="color: #6b7280;">No patrons matched for this folder yet. Click "Process Image" to run facial recognition.</td></tr>';
                         return;
                     }
 
@@ -373,26 +374,26 @@ def dashboard():
                             <td>${escapeHtml(p.phone)}</td>
                             <td>${p.photoCount} photo(s)</td>
                             <td style="text-align: right;">
-                                <button class="btn btn-light btn-sm" onclick="shareSinglePatron("${p.email}", "${escapeHtml(p.name)}")">Share</button>
+                                <button class="btn btn-light btn-sm" onclick="shareSinglePatron('${p.email}', '${escapeHtml(p.name)}')">Share</button>
                             </td>
                         </tr>
-                    `).join("");
+                    `).join('');
                     
                     logConsole(`Grid 2 populated: Found ${patrons.length} matched patron(s).`);
                 } catch (err) {
-                    logConsole("ERROR loading Grid 2: " + err.message);
+                    logConsole('ERROR loading Grid 2: ' + err.message);
                 }
             }
 
             async function processImage() {
                 if (!currentSelectedFolder) return;
                 logConsole(`Running facial recognition for folder "${currentSelectedFolder.name}"...`);
-                document.getElementById("btnProcessImage").disabled = true;
+                document.getElementById('btnProcessImage').disabled = true;
 
                 try {
-                    const res = await fetch("/api/admin/process-folder", {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
+                    const res = await fetch('/api/admin/process-folder', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ folder_id: currentSelectedFolder.id, folder_name: currentSelectedFolder.name })
                     });
                     const data = await res.json();
@@ -402,18 +403,18 @@ def dashboard():
                     await loadGrid1Folders();
                     await loadGrid2Patrons(currentSelectedFolder.id);
                 } catch (err) {
-                    logConsole("ERROR during facial recognition processing: " + err.message);
+                    logConsole('ERROR during facial recognition processing: ' + err.message);
                 } finally {
-                    document.getElementById("btnProcessImage").disabled = false;
+                    document.getElementById('btnProcessImage').disabled = false;
                 }
             }
 
             async function shareSinglePatron(email, name) {
                 logConsole(`Sending matched photo bundle email to ${name} (${email})...`);
                 try {
-                    const res = await fetch("/api/admin/share-single", {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
+                    const res = await fetch('/api/admin/share-single', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ folder_id: currentSelectedFolder.id, email: email })
                     });
                     const data = await res.json();
@@ -427,12 +428,12 @@ def dashboard():
             async function shareToAllMatched() {
                 if (!currentSelectedFolder) return;
                 logConsole(`Dispatching photo emails to all unsent matched patrons for "${currentSelectedFolder.name}"...`);
-                document.getElementById("btnShareAll").disabled = true;
+                document.getElementById('btnShareAll').disabled = true;
 
                 try {
-                    const res = await fetch("/api/admin/share-all", {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
+                    const res = await fetch('/api/admin/share-all', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ folder_id: currentSelectedFolder.id })
                     });
                     const data = await res.json();
@@ -440,38 +441,38 @@ def dashboard():
 
                     logConsole(`Bulk email complete: Sent ${data.sent_count} email package(s).`);
                 } catch (err) {
-                    logConsole("ERROR in bulk share: " + err.message);
+                    logConsole('ERROR in bulk share: ' + err.message);
                 } finally {
-                    document.getElementById("btnShareAll").disabled = false;
+                    document.getElementById('btnShareAll').disabled = false;
                 }
             }
 
             function logConsole(msg) {
-                const box = document.getElementById("consoleOutput");
+                const box = document.getElementById('consoleOutput');
                 const time = new Date().toLocaleTimeString();
                 box.innerHTML = `<p class="console-line">[${time}] ${escapeHtml(msg)}</p>` + box.innerHTML;
             }
 
             function escapeHtml(str) {
-                return (str || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+                return (str || '').replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
             }
 
             loadGrid1Folders();
         </script>
     </body>
     </html>
-    """
-    return html.replace("USER_EMAIL_PLACEHOLDER", email)
+    '''
+    return html.replace('USER_EMAIL_PLACEHOLDER', email)
 
-@app.route("/api/auth/login")
+@app.route('/api/auth/login')
 def login():
     client_config, client_file = get_client_config()
     scopes = [
-        "https://www.googleapis.com/auth/drive", 
-        "https://www.googleapis.com/auth/spreadsheets", 
-        "https://www.googleapis.com/auth/gmail.send",
-        "https://www.googleapis.com/auth/userinfo.email",
-        "openid"
+        'https://www.googleapis.com/auth/drive', 
+        'https://www.googleapis.com/auth/spreadsheets', 
+        'https://www.googleapis.com/auth/gmail.send',
+        'https://www.googleapis.com/auth/userinfo.email',
+        'openid'
     ]
     if client_file:
         flow = Flow.from_client_secrets_file(client_file, scopes=scopes)
@@ -480,31 +481,31 @@ def login():
 
     flow.redirect_uri = "https://photoshare-app-632737028539.us-central1.run.app/oauth2callback"
     authorization_url, state = flow.authorization_url(
-        access_type="offline", 
-        include_granted_scopes="true",
-        prompt="consent"
+        access_type='offline', 
+        include_granted_scopes='true',
+        prompt='consent'
     )
-    session["state"] = state
-    if hasattr(flow, "code_verifier") and flow.code_verifier:
-        session["code_verifier"] = flow.code_verifier
+    session['state'] = state
+    if hasattr(flow, 'code_verifier') and flow.code_verifier:
+        session['code_verifier'] = flow.code_verifier
 
     return redirect(authorization_url)
 
-@app.route("/oauth2callback")
+@app.route('/oauth2callback')
 def oauth2callback():
     global system_creds_cache
     try:
-        state = session.get("state", None)
+        state = session.get('state', None)
         if not state:
             return "<h3>Error: Session state lost during redirect.</h3>", 400
 
         client_config, client_file = get_client_config()
         scopes = [
-            "https://www.googleapis.com/auth/drive", 
-            "https://www.googleapis.com/auth/spreadsheets", 
-            "https://www.googleapis.com/auth/gmail.send",
-            "https://www.googleapis.com/auth/userinfo.email",
-            "openid"
+            'https://www.googleapis.com/auth/drive', 
+            'https://www.googleapis.com/auth/spreadsheets', 
+            'https://www.googleapis.com/auth/gmail.send',
+            'https://www.googleapis.com/auth/userinfo.email',
+            'openid'
         ]
         if client_file:
             flow = Flow.from_client_secrets_file(client_file, state=state, scopes=scopes)
@@ -512,53 +513,53 @@ def oauth2callback():
             flow = Flow.from_client_config(client_config, state=state, scopes=scopes)
 
         flow.redirect_uri = "https://photoshare-app-632737028539.us-central1.run.app/oauth2callback"
-        if "code_verifier" in session:
-            flow.code_verifier = session["code_verifier"]
+        if 'code_verifier' in session:
+            flow.code_verifier = session['code_verifier']
         
         authorization_response = request.url
-        if authorization_response.startswith("http://"):
-            authorization_response = authorization_response.replace("http://", "https://", 1)
+        if authorization_response.startswith('http://'):
+            authorization_response = authorization_response.replace('http://', 'https://', 1)
             
         flow.fetch_token(authorization_response=authorization_response)
         creds = flow.credentials
 
-        user_info_service = build("oauth2", "v2", credentials=creds)
+        user_info_service = build('oauth2', 'v2', credentials=creds)
         user_info = user_info_service.userinfo().get().execute()
-        email = user_info.get("email")
+        email = user_info.get('email')
 
         if email not in ALLOWED_USERS:
             return f"403 Forbidden: Identity Unauthorized ({email})", 403
 
         creds_dict = {
-            "token": creds.token,
-            "refresh_token": creds.refresh_token,
-            "token_uri": creds.token_uri,
-            "client_id": creds.client_id,
-            "client_secret": creds.client_secret,
-            "scopes": creds.scopes
+            'token': creds.token,
+            'refresh_token': creds.refresh_token,
+            'token_uri': creds.token_uri,
+            'client_id': creds.client_id,
+            'client_secret': creds.client_secret,
+            'scopes': creds.scopes
         }
         
-        session["credentials"] = creds_dict
-        session["user_email"] = email
+        session['credentials'] = creds_dict
+        session['user_email'] = email
         system_creds_cache = creds_dict
         
-        return redirect("/dashboard")
+        return redirect('/dashboard')
 
     except Exception as e:
         return f"<h1>Internal Error:</h1><pre>{traceback.format_exc()}</pre>", 500
 
-@app.route("/logout")
+@app.route('/logout')
 def logout():
     session.clear()
-    return redirect("/")
+    return redirect('/')
 
-@app.route("/api/patron/checkin", methods=["POST"])
+@app.route('/api/patron/checkin', methods=['POST'])
 def patron_checkin():
     global system_creds_cache
-    name = request.form.get("name")
-    email = request.form.get("email")
-    phone = request.form.get("phone")
-    selfie_file = request.files.get("selfie")
+    name = request.form.get('name')
+    email = request.form.get('email')
+    phone = request.form.get('phone')
+    selfie_file = request.files.get('selfie')
 
     if not name or not email or not phone or not selfie_file:
         return jsonify({"error": "Missing mandatory fields"}), 400
@@ -570,7 +571,7 @@ def patron_checkin():
 
     embedding_json = json.dumps(encodings[0].tolist())
 
-    creds_to_use = session.get("credentials") or system_creds_cache
+    creds_to_use = session.get('credentials') or system_creds_cache
     if not creds_to_use:
         return jsonify({"error": "Server not authenticated with Google Sheets yet. Admin must log in once at /api/auth/login to authorize guest check-ins."}), 503
 
@@ -590,20 +591,20 @@ def patron_checkin():
     except Exception as e:
         return jsonify({"error": f"Failed to append to Google Sheets: {str(e)}"}), 500
 
-@app.route("/api/admin/folders")
+@app.route('/api/admin/folders')
 def api_get_folders():
-    if "credentials" not in session:
+    if 'credentials' not in session:
         return jsonify({"error": "Unauthorized"}), 401
     
     try:
-        drive_srv, sheets_srv, _ = get_google_services(session["credentials"])
+        drive_srv, sheets_srv, _ = get_google_services(session['credentials'])
         
         try:
             root_folder = drive_srv.files().get(fileId=TARGET_DRIVE_FOLDER_ID, fields="id, name").execute()
         except Exception as err:
             return jsonify({"error": f"Unable to access Drive Folder ID ({TARGET_DRIVE_FOLDER_ID}). Details: {str(err)}"}), 400
 
-        photoz_id = root_folder["id"]
+        photoz_id = root_folder['id']
         
         sub_query = f"'{photoz_id}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
         sub_res = drive_srv.files().list(
@@ -611,21 +612,21 @@ def api_get_folders():
             fields="files(id, name, createdTime)", 
             orderBy="createdTime desc"
         ).execute()
-        event_folders = sub_res.get("files", [])
+        event_folders = sub_res.get('files', [])
         
         results = []
         for f in event_folders:
-            folder_id = f["id"]
-            folder_name = f["name"]
+            folder_id = f['id']
+            folder_name = f['name']
             
             file_query = f"'{folder_id}' in parents and mimeType contains 'image/' and trashed = false"
             file_res = drive_srv.files().list(q=file_query, fields="files(id)").execute()
-            photo_count = len(file_res.get("files", []))
+            photo_count = len(file_res.get('files', []))
             
             patron_count = 0
             try:
                 sheet_data = sheets_srv.spreadsheets().values().get(spreadsheetId=SPREADSHEET_ID, range="matchedfaces!A2:G").execute()
-                rows = sheet_data.get("values", [])
+                rows = sheet_data.get('values', [])
                 matched_patrons = set(r[2] for r in rows if len(r) >= 3 and r[0] == folder_id)
                 patron_count = len(matched_patrons)
             except Exception:
@@ -642,17 +643,17 @@ def api_get_folders():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-@app.route("/api/admin/matched-patrons")
+@app.route('/api/admin/matched-patrons')
 def api_matched_patrons():
-    if "credentials" not in session:
+    if 'credentials' not in session:
         return jsonify({"error": "Unauthorized"}), 401
         
-    folder_id = request.args.get("folder_id")
+    folder_id = request.args.get('folder_id')
     if not folder_id:
         return jsonify({"error": "Missing folder_id"}), 400
 
     try:
-        _, sheets_srv, _ = get_google_services(session["credentials"])
+        _, sheets_srv, _ = get_google_services(session['credentials'])
         
         matched_data = []
         try:
@@ -660,7 +661,7 @@ def api_matched_patrons():
                 spreadsheetId=SPREADSHEET_ID, 
                 range="matchedfaces!A2:G"
             ).execute()
-            matched_data = matched_res.get("values", [])
+            matched_data = matched_res.get('values', [])
         except Exception:
             matched_data = []
 
@@ -678,24 +679,24 @@ def api_matched_patrons():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-@app.route("/api/admin/process-folder", methods=["POST"])
+@app.route('/api/admin/process-folder', methods=['POST'])
 def api_process_folder():
-    if "credentials" not in session:
+    if 'credentials' not in session:
         return jsonify({"error": "Unauthorized"}), 401
         
     data = request.get_json() or {}
-    folder_id = data.get("folder_id")
+    folder_id = data.get('folder_id')
     if not folder_id:
         return jsonify({"error": "Missing folder_id"}), 400
 
     try:
-        drive_srv, sheets_srv, _ = get_google_services(session["credentials"])
+        drive_srv, sheets_srv, _ = get_google_services(session['credentials'])
         
         files_res = drive_srv.files().list(
             q=f"'{folder_id}' in parents and mimeType contains 'image/' and trashed = false", 
             fields="files(id, name, webViewLink)"
         ).execute()
-        image_files = files_res.get("files", [])
+        image_files = files_res.get('files', [])
         
         if not image_files:
             return jsonify({"success": True, "processed_count": 0, "message": "No images found."})
@@ -703,7 +704,7 @@ def api_process_folder():
         patron_data = []
         try:
             p_res = sheets_srv.spreadsheets().values().get(spreadsheetId=SPREADSHEET_ID, range="Sheet1!A2:E").execute()
-            patron_data = p_res.get("values", [])
+            patron_data = p_res.get('values', [])
         except Exception:
             patron_data = []
 
@@ -730,16 +731,16 @@ def api_process_folder():
 
         for img in image_files:
             try:
-                img_content = drive_srv.files().get_media(fileId=img["id"]).execute()
+                img_content = drive_srv.files().get_media(fileId=img['id']).execute()
                 img_encodings = extract_face_embeddings(img_content)
-                img_link = img.get("webViewLink", f"https://drive.google.com/file/d/{img['id']}/view")
+                img_link = img.get('webViewLink', f"https://drive.google.com/file/d/{img['id']}/view")
 
                 for face_enc in img_encodings:
                     for patron in known_patrons:
-                        distance = face_recognition.face_distance([patron["encoding"]], face_enc)[0]
+                        distance = face_recognition.face_distance([patron['encoding']], face_enc)[0]
                         if distance <= 0.6:
-                            if img_link not in patron["matched_links"]:
-                                patron["matched_links"].append(img_link)
+                            if img_link not in patron['matched_links']:
+                                patron['matched_links'].append(img_link)
             except Exception as file_err:
                 print(f"Error processing image {img['id']}: {file_err}")
                 continue
@@ -748,15 +749,15 @@ def api_process_folder():
         new_matched_rows = []
 
         for patron in known_patrons:
-            if patron["matched_links"]:
-                links_str = "\n".join(patron["matched_links"])
-                match_count = len(patron["matched_links"])
+            if patron['matched_links']:
+                links_str = "\n".join(patron['matched_links'])
+                match_count = len(patron['matched_links'])
 
                 new_matched_rows.append([
                     folder_id,
-                    patron["name"],
-                    patron["email"],
-                    patron["phone"],
+                    patron['name'],
+                    patron['email'],
+                    patron['phone'],
                     match_count,
                     links_str,
                     timestamp_now
@@ -774,23 +775,23 @@ def api_process_folder():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-@app.route("/api/admin/share-single", methods=["POST"])
+@app.route('/api/admin/share-single', methods=['POST'])
 def api_share_single():
-    if "credentials" not in session:
+    if 'credentials' not in session:
         return jsonify({"error": "Unauthorized"}), 401
     
     data = request.get_json() or {}
-    folder_id = data.get("folder_id")
-    target_email = data.get("email")
+    folder_id = data.get('folder_id')
+    target_email = data.get('email')
 
     if not folder_id or not target_email:
         return jsonify({"error": "Missing folder_id or email"}), 400
 
     try:
-        _, sheets_srv, gmail_srv = get_google_services(session["credentials"])
+        _, sheets_srv, gmail_srv = get_google_services(session['credentials'])
         
         res = sheets_srv.spreadsheets().values().get(spreadsheetId=SPREADSHEET_ID, range="matchedfaces!A2:G").execute()
-        rows = res.get("values", [])
+        rows = res.get('values', [])
 
         target_row = None
         for r in rows:
@@ -809,22 +810,22 @@ def api_share_single():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-@app.route("/api/admin/share-all", methods=["POST"])
+@app.route('/api/admin/share-all', methods=['POST'])
 def api_share_all():
-    if "credentials" not in session:
+    if 'credentials' not in session:
         return jsonify({"error": "Unauthorized"}), 401
 
     data = request.get_json() or {}
-    folder_id = data.get("folder_id")
+    folder_id = data.get('folder_id')
 
     if not folder_id:
         return jsonify({"error": "Missing folder_id"}), 400
 
     try:
-        _, sheets_srv, gmail_srv = get_google_services(session["credentials"])
+        _, sheets_srv, gmail_srv = get_google_services(session['credentials'])
         
         res = sheets_srv.spreadsheets().values().get(spreadsheetId=SPREADSHEET_ID, range="matchedfaces!A2:G").execute()
-        rows = res.get("values", [])
+        rows = res.get('values', [])
 
         sent_count = 0
         for r in rows:
@@ -843,6 +844,6 @@ def api_share_all():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host="0.0.0.0", port=port)
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 8080))
+    app.run(host='0.0.0.0', port=port)
