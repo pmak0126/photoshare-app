@@ -12,13 +12,15 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 import face_recognition
-from PIL import Image
+from PIL import Image, ImageOps
 
 VERSION = "v3-facematch"
 ALLOWED_USERS = ["pranavcoolstar@gmail.com", "makwanapranav26@gmail.com"]
 
 SPREADSHEET_ID = "1gWWBNpKU1lIEz7RCiCycIqvg_QJKARqPJHbpIr78RvE"
 TARGET_DRIVE_FOLDER_ID = "1FBhdmP9xzKnD8-aCx5aJIV3jcgoujWIm"
+
+TOKEN_FILE = "/tmp/google_tokens.json"
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", "super_secret_dev_key")
@@ -33,6 +35,28 @@ system_creds_cache = None
 @app.errorhandler(500)
 def handle_500_error(e):
     return f"<h1>500 Internal Server Error (Diagnostic Catch)</h1><pre>{traceback.format_exc()}</pre>", 500
+
+def save_creds_to_disk(creds_dict):
+    global system_creds_cache
+    system_creds_cache = creds_dict
+    try:
+        with open(TOKEN_FILE, 'w') as f:
+            json.dump(creds_dict, f)
+    except Exception as e:
+        print(f"Failed to persist tokens to disk: {e}")
+
+def load_creds():
+    global system_creds_cache
+    if system_creds_cache:
+        return system_creds_cache
+    if os.path.exists(TOKEN_FILE):
+        try:
+            with open(TOKEN_FILE, 'r') as f:
+                system_creds_cache = json.load(f)
+                return system_creds_cache
+        except Exception:
+            pass
+    return None
 
 def get_client_config():
     if os.path.exists('client_secret.json'):
@@ -50,10 +74,20 @@ def get_client_config():
 def extract_face_embeddings(image_bytes):
     try:
         image = Image.open(io.BytesIO(image_bytes))
+        
+        # FIX MOBILE ORIENTATION: Auto-rotate mobile camera selfies based on EXIF tags
+        image = ImageOps.exif_transpose(image)
+        
         image = image.convert('RGB')
-        image.thumbnail((1000, 1000))
+        image.thumbnail((1200, 1200))
         np_img = np.array(image)
+        
         encodings = face_recognition.face_encodings(np_img)
+        
+        # Fallback for smaller/harder faces on mobile camera sensors
+        if not encodings:
+            encodings = face_recognition.face_encodings(np_img, number_of_times_to_upsample=2)
+            
         return encodings
     except Exception as e:
         print(f"Error extracting face embedding: {e}")
@@ -155,7 +189,7 @@ def checkin_form():
                 <div class="form-group"><label>Full Name *</label><input type="text" name="name" required></div>
                 <div class="form-group"><label>Email Address *</label><input type="email" name="email" required></div>
                 <div class="form-group"><label>Phone Number *</label><input type="tel" name="phone" required></div>
-                <div class="form-group"><label>Take/Upload Selfie *</label><input type="file" name="selfie" accept="image/*" required></div>
+                <div class="form-group"><label>Take/Upload Selfie *</label><input type="file" name="selfie" accept="image/*" capture="user" required></div>
                 <button type="submit" id="submitBtn" class="btn">Complete Check-In</button>
             </form>
             <div id="message"></div>
@@ -166,6 +200,7 @@ def checkin_form():
                 const submitBtn = document.getElementById('submitBtn');
                 const messageDiv = document.getElementById('message');
                 submitBtn.disabled = true;
+                submitBtn.innerText = 'Processing Selfie...';
                 const formData = new FormData(this);
                 try {
                     const response = await fetch('/api/patron/checkin', { method: 'POST', body: formData });
@@ -180,7 +215,10 @@ def checkin_form():
                     messageDiv.className = 'error';
                     messageDiv.innerHTML = '❌ Error: ' + err.message;
                     messageDiv.style.display = 'block';
-                } finally { submitBtn.disabled = false; }
+                } finally { 
+                    submitBtn.disabled = false; 
+                    submitBtn.innerText = 'Complete Check-In';
+                }
             });
         </script>
     </body>
@@ -493,7 +531,6 @@ def login():
 
 @app.route('/oauth2callback')
 def oauth2callback():
-    global system_creds_cache
     try:
         state = session.get('state', None)
         if not state:
@@ -541,7 +578,7 @@ def oauth2callback():
         
         session['credentials'] = creds_dict
         session['user_email'] = email
-        system_creds_cache = creds_dict
+        save_creds_to_disk(creds_dict)
         
         return redirect('/dashboard')
 
@@ -555,7 +592,6 @@ def logout():
 
 @app.route('/api/patron/checkin', methods=['POST'])
 def patron_checkin():
-    global system_creds_cache
     name = request.form.get('name')
     email = request.form.get('email')
     phone = request.form.get('phone')
@@ -571,7 +607,7 @@ def patron_checkin():
 
     embedding_json = json.dumps(encodings[0].tolist())
 
-    creds_to_use = session.get('credentials') or system_creds_cache
+    creds_to_use = session.get('credentials') or load_creds()
     if not creds_to_use:
         return jsonify({"error": "Server not authenticated with Google Sheets yet. Admin must log in once at /api/auth/login to authorize guest check-ins."}), 503
 
