@@ -14,18 +14,12 @@ from googleapiclient.discovery import build
 import face_recognition
 from PIL import Image, ImageOps
 
-VERSION = "v4-dynamic-users"
+VERSION = "v4-picker-autoinit"
 
-# Mutable set for dynamic authorization during server runtime
 ALLOWED_USERS = {"pranavcoolstar@gmail.com", "makwanapranav26@gmail.com"}
 
-# Default config mapping per user (Fallback defaults if not provided in session)
 DEFAULT_USER_CONFIGS = {
     "pranavcoolstar@gmail.com": {
-        "spreadsheet_id": "1gWWBNpKU1lIEz7RCiCycIqvg_QJKARqPJHbpIr78RvE",
-        "drive_folder_id": "1FBhdmP9xzKnD8-aCx5aJIV3jcgoujWIm"
-    },
-    "makwanapranav26@gmail.com": {
         "spreadsheet_id": "1gWWBNpKU1lIEz7RCiCycIqvg_QJKARqPJHbpIr78RvE",
         "drive_folder_id": "1FBhdmP9xzKnD8-aCx5aJIV3jcgoujWIm"
     }
@@ -42,16 +36,6 @@ app.config.update(
 )
 
 system_creds_cache = None
-
-def get_user_spreadsheet_id():
-    return session.get('spreadsheet_id') or os.environ.get("SPREADSHEET_ID", "1gWWBNpKU1lIEz7RCiCycIqvg_QJKARqPJHbpIr78RvE")
-
-def get_user_drive_folder_id():
-    return session.get('drive_folder_id') or os.environ.get("TARGET_DRIVE_FOLDER_ID", "1FBhdmP9xzKnD8-aCx5aJIV3jcgoujWIm")
-
-@app.errorhandler(500)
-def handle_500_error(e):
-    return f"<h1>500 Internal Server Error (Diagnostic Catch)</h1><pre>{traceback.format_exc()}</pre>", 500
 
 def save_creds_to_disk(creds_dict):
     global system_creds_cache
@@ -74,6 +58,12 @@ def load_creds():
         except Exception:
             pass
     return None
+
+def get_user_spreadsheet_id():
+    return session.get('spreadsheet_id') or os.environ.get("SPREADSHEET_ID", "1gWWBNpKU1lIEz7RCiCycIqvg_QJKARqPJHbpIr78RvE")
+
+def get_user_drive_folder_id():
+    return session.get('drive_folder_id') or os.environ.get("TARGET_DRIVE_FOLDER_ID", "1FBhdmP9xzKnD8-aCx5aJIV3jcgoujWIm")
 
 def get_client_config():
     if os.path.exists('client_secret.json'):
@@ -117,6 +107,60 @@ def get_google_services(creds_dict):
     sheets_service = build('sheets', 'v4', credentials=creds)
     gmail_service = build('gmail', 'v1', credentials=creds)
     return drive_service, sheets_service, gmail_service
+
+def init_user_spreadsheet(sheets_srv, spreadsheet_id):
+    """Auto-creates Sheet1 and matchedfaces sub-sheets with required headers if missing."""
+    try:
+        spreadsheet = sheets_srv.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
+        existing_sheets = [s['properties']['title'] for s in spreadsheet.get('sheets', [])]
+
+        requests = []
+        
+        if 'Sheet1' not in existing_sheets:
+            requests.append({
+                'addSheet': {'properties': {'title': 'Sheet1'}}
+            })
+            
+        if 'matchedfaces' not in existing_sheets:
+            requests.append({
+                'addSheet': {'properties': {'title': 'matchedfaces'}}
+            })
+
+        if requests:
+            sheets_srv.spreadsheets().batchUpdate(
+                spreadsheetId=spreadsheet_id,
+                body={'requests': requests}
+            ).execute()
+
+        # Initialize Sheet1 Headers
+        try:
+            s1_val = sheets_srv.spreadsheets().values().get(spreadsheetId=spreadsheet_id, range="Sheet1!A1:E1").execute()
+            if not s1_val.get('values'):
+                sheets_srv.spreadsheets().values().update(
+                    spreadsheetId=spreadsheet_id,
+                    range="Sheet1!A1:E1",
+                    valueInputOption="USER_ENTERED",
+                    body={"values": [["Name", "Email", "Phone", "Timestamp", "Face Encoding JSON string"]]}
+                ).execute()
+        except Exception as e:
+            print(f"Error initializing Sheet1 headers: {e}")
+
+        # Initialize matchedfaces Headers
+        try:
+            mf_val = sheets_srv.spreadsheets().values().get(spreadsheetId=spreadsheet_id, range="matchedfaces!A1:G1").execute()
+            if not mf_val.get('values'):
+                sheets_srv.spreadsheets().values().update(
+                    spreadsheetId=spreadsheet_id,
+                    range="matchedfaces!A1:G1",
+                    valueInputOption="USER_ENTERED",
+                    body={"values": [["Folder_ID", "Name", "Email", "Phone", "Match_Count", "Photo_Links", "Delivered_At"]]}
+                ).execute()
+        except Exception as e:
+            print(f"Error initializing matchedfaces headers: {e}")
+
+    except Exception as e:
+        print(f"Failed to auto-initialize spreadsheet {spreadsheet_id}: {e}")
+        raise e
 
 def send_photo_email(gmail_srv, recipient_email, recipient_name, photo_links):
     message = MIMEMultipart("alternative")
@@ -281,8 +325,11 @@ def dashboard():
             .card-title { font-size: 16px; font-weight: 700; color: #111827; margin: 0 0 16px 0; display: flex; justify-content: space-between; align-items: center; }
             
             .search-input { width: 100%; padding: 10px 16px; border: 1px solid #d1d5db; border-radius: 8px; font-size: 14px; box-sizing: border-box; margin-bottom: 12px; }
-            .config-bar { display: flex; gap: 10px; margin-bottom: 15px; background: #f8fafc; padding: 12px; border-radius: 8px; border: 1px solid #e2e8f0; }
-            .config-bar input { flex: 1; padding: 8px 12px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 13px; }
+            
+            .config-section { display: flex; flex-direction: column; gap: 12px; background: #f8fafc; padding: 16px; border-radius: 8px; border: 1px solid #e2e8f0; margin-bottom: 10px; }
+            .config-field-group { display: flex; align-items: center; gap: 10px; }
+            .config-label { width: 160px; font-size: 13px; font-weight: 600; color: #334155; }
+            .config-field-group input { flex: 1; padding: 8px 12px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 13px; }
 
             .table-container { max-height: 340px; overflow-y: auto; border: 1px solid #f3f4f6; border-radius: 8px; }
             .data-table { width: 100%; border-collapse: collapse; text-align: left; }
@@ -294,6 +341,13 @@ def dashboard():
             
             .console-box { background: #0b1329; color: #e2e8f0; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; padding: 16px; border-radius: 10px; font-size: 13px; line-height: 1.6; max-height: 160px; overflow-y: auto; }
             .console-line { margin: 0; }
+
+            /* Modal Styles */
+            .modal-backdrop { position: fixed; top:0; left:0; width:100vw; height:100vh; background: rgba(0,0,0,0.5); display:none; justify-content:center; align-items:center; z-index:9999; }
+            .modal-box { background: white; padding: 24px; border-radius: 12px; width: 500px; max-width: 90%; max-height: 80vh; display: flex; flex-direction: column; gap: 12px; }
+            .modal-list { max-height: 300px; overflow-y: auto; border: 1px solid #e2e8f0; border-radius: 6px; }
+            .modal-item { padding: 10px 14px; border-bottom: 1px solid #f1f5f9; cursor: pointer; font-size: 14px; display: flex; justify-content: space-between; }
+            .modal-item:hover { background: #f8fafc; color: #2563eb; }
         </style>
     </head>
     <body>
@@ -310,13 +364,25 @@ def dashboard():
                 </div>
             </div>
 
-            <!-- Workspace Config Bar -->
+            <!-- Workspace Config Section with Browse Buttons -->
             <div class="card" style="padding: 16px 24px;">
-                <div style="font-size: 13px; font-weight: 600; margin-bottom: 8px; color: #475569;">Active User Resource Config</div>
-                <div class="config-bar">
-                    <input type="text" id="driveFolderInput" value="DRIVE_FOLDER_PLACEHOLDER" placeholder="Google Drive Folder ID">
-                    <input type="text" id="spreadsheetInput" value="SPREADSHEET_PLACEHOLDER" placeholder="Google Sheet ID">
-                    <button class="btn btn-light btn-sm" onclick="updateUserConfig()">Save Workspace IDs</button>
+                <div style="font-size: 14px; font-weight: 700; margin-bottom: 12px; color: #1e293b;">Active User Resource Config</div>
+                <div class="config-section">
+                    <div class="config-field-group">
+                        <span class="config-label">Drive Folder:</span>
+                        <input type="text" id="driveFolderName" readonly placeholder="Drive Folder Name Loading..." style="background:#f1f5f9; flex: 1;">
+                        <input type="text" id="driveFolderInput" value="DRIVE_FOLDER_PLACEHOLDER" placeholder="Folder ID" style="width: 220px;">
+                        <button class="btn btn-light btn-sm" onclick="openPicker('folder')">Browse Drive</button>
+                    </div>
+                    <div class="config-field-group">
+                        <span class="config-label">Google Sheet:</span>
+                        <input type="text" id="spreadsheetName" readonly placeholder="Sheet Name Loading..." style="background:#f1f5f9; flex: 1;">
+                        <input type="text" id="spreadsheetInput" value="SPREADSHEET_PLACEHOLDER" placeholder="Sheet ID" style="width: 220px;">
+                        <button class="btn btn-light btn-sm" onclick="openPicker('sheet')">Browse Sheets</button>
+                    </div>
+                    <div style="text-align: right; margin-top: 4px;">
+                        <button class="btn btn-blue btn-sm" onclick="updateUserConfig()">Save Workspace IDs</button>
+                    </div>
                 </div>
             </div>
 
@@ -369,15 +435,76 @@ def dashboard():
             </div>
         </div>
 
+        <!-- Drive/Sheet Picker Modal -->
+        <div id="pickerModal" class="modal-backdrop">
+            <div class="modal-box">
+                <div style="display:flex; justify-content:space-between; align-items:center;">
+                    <h3 id="modalTitle" style="margin:0; font-size:16px;">Select Resource</h3>
+                    <button onclick="closePicker()" style="border:none; background:none; cursor:pointer; font-size:18px;">✕</button>
+                </div>
+                <div id="modalList" class="modal-list">
+                    <div style="padding:16px; text-align:center; color:#64748b;">Loading files...</div>
+                </div>
+            </div>
+        </div>
+
         <script>
             let grid1Folders = [];
             let currentSelectedFolder = null;
+            let currentPickerType = null;
+
+            async function openPicker(type) {
+                currentPickerType = type;
+                const modal = document.getElementById('pickerModal');
+                const title = document.getElementById('modalTitle');
+                const list = document.getElementById('modalList');
+                
+                title.innerText = type === 'folder' ? 'Select Drive Folder' : 'Select Google Sheet';
+                list.innerHTML = '<div style="padding:16px; text-align:center; color:#64748b;">Fetching Drive resources...</div>';
+                modal.style.display = 'flex';
+
+                try {
+                    const res = await fetch(`/api/admin/drive-resources?type=${type}`);
+                    const data = await res.json();
+                    if (data.error) throw new Error(data.error);
+
+                    if (data.items.length === 0) {
+                        list.innerHTML = `<div style="padding:16px; text-align:center; color:#64748b;">No ${type === 'folder' ? 'folders' : 'sheets'} found in your Drive.</div>`;
+                        return;
+                    }
+
+                    list.innerHTML = data.items.map(item => `
+                        <div class="modal-item" onclick="selectPickerItem('${item.id}', '${escapeHtml(item.name)}')">
+                            <span><strong>${escapeHtml(item.name)}</strong></span>
+                            <span style="font-size:11px; color:#94a3b8; font-family:monospace;">${item.id}</span>
+                        </div>
+                    `).join('');
+                } catch (err) {
+                    list.innerHTML = `<div style="padding:16px; text-align:center; color:#ef4444;">Error: ${err.message}</div>`;
+                }
+            }
+
+            function selectPickerItem(id, name) {
+                if (currentPickerType === 'folder') {
+                    document.getElementById('driveFolderInput').value = id;
+                    document.getElementById('driveFolderName').value = name;
+                } else {
+                    document.getElementById('spreadsheetInput').value = id;
+                    document.getElementById('spreadsheetName').value = name;
+                }
+                closePicker();
+                updateUserConfig();
+            }
+
+            function closePicker() {
+                document.getElementById('pickerModal').style.display = 'none';
+            }
 
             async function updateUserConfig() {
                 const driveFolderId = document.getElementById('driveFolderInput').value.trim();
                 const spreadsheetId = document.getElementById('spreadsheetInput').value.trim();
                 
-                logConsole('Updating workspace config IDs...');
+                logConsole('Updating and initializing workspace config...');
                 try {
                     const res = await fetch('/api/admin/config', {
                         method: 'POST',
@@ -386,11 +513,24 @@ def dashboard():
                     });
                     const data = await res.json();
                     if (data.error) throw new Error(data.error);
-                    logConsole('Workspace IDs updated successfully!');
+                    
+                    if(data.drive_folder_name) document.getElementById('driveFolderName').value = data.drive_folder_name;
+                    if(data.spreadsheet_name) document.getElementById('spreadsheetName').value = data.spreadsheet_name;
+
+                    logConsole('Workspace saved! Automatically verified and created Sheet1 & matchedfaces sub-sheets.');
                     loadGrid1Folders();
                 } catch (err) {
                     logConsole('ERROR updating config: ' + err.message);
                 }
+            }
+
+            async function fetchResourceNames() {
+                try {
+                    const res = await fetch('/api/admin/resource-names');
+                    const data = await res.json();
+                    if(data.drive_folder_name) document.getElementById('driveFolderName').value = data.drive_folder_name;
+                    if(data.spreadsheet_name) document.getElementById('spreadsheetName').value = data.spreadsheet_name;
+                } catch(e){}
             }
 
             async function loadGrid1Folders() {
@@ -549,12 +689,60 @@ def dashboard():
                 return (str || '').replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
             }
 
+            fetchResourceNames();
             loadGrid1Folders();
         </script>
     </body>
     </html>
     '''
     return html.replace('USER_EMAIL_PLACEHOLDER', email).replace('DRIVE_FOLDER_PLACEHOLDER', drive_id).replace('SPREADSHEET_PLACEHOLDER', sheet_id)
+
+@app.route('/api/admin/drive-resources')
+def api_drive_resources():
+    if 'credentials' not in session:
+        return jsonify({"error": "Unauthorized"}), 401
+    
+    res_type = request.args.get('type', 'folder')
+    try:
+        drive_srv, _, _ = get_google_services(session['credentials'])
+        
+        if res_type == 'folder':
+            q = "mimeType = 'application/vnd.google-apps.folder' and trashed = false"
+        else:
+            q = "mimeType = 'application/vnd.google-apps.spreadsheet' and trashed = false"
+
+        res = drive_srv.files().list(q=q, fields="files(id, name)", pageSize=50, orderBy="modifiedTime desc").execute()
+        return jsonify({"items": res.get('files', [])})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/admin/resource-names')
+def api_resource_names():
+    if 'credentials' not in session:
+        return jsonify({"error": "Unauthorized"}), 401
+    try:
+        drive_srv, _, _ = get_google_services(session['credentials'])
+        
+        folder_name, sheet_name = "N/A", "N/A"
+        
+        drive_id = get_user_drive_folder_id()
+        sheet_id = get_user_spreadsheet_id()
+        
+        if drive_id:
+            try:
+                f_meta = drive_srv.files().get(fileId=drive_id, fields="name").execute()
+                folder_name = f_meta.get('name', 'Drive Folder')
+            except Exception: pass
+            
+        if sheet_id:
+            try:
+                s_meta = drive_srv.files().get(fileId=sheet_id, fields="name").execute()
+                sheet_name = s_meta.get('name', 'Google Sheet')
+            except Exception: pass
+
+        return jsonify({"drive_folder_name": folder_name, "spreadsheet_name": sheet_name})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 @app.route('/api/admin/config', methods=['POST'])
 def api_update_config():
@@ -570,7 +758,25 @@ def api_update_config():
     if spreadsheet_id:
         session['spreadsheet_id'] = spreadsheet_id
 
-    return jsonify({"success": True})
+    drive_srv, sheets_srv, _ = get_google_services(session['credentials'])
+    
+    # Auto initialize sub-sheets in user's target spreadsheet
+    if spreadsheet_id:
+        try:
+            init_user_spreadsheet(sheets_srv, spreadsheet_id)
+        except Exception as err:
+            return jsonify({"error": f"Failed to initialize sub-sheets in target Google Sheet: {str(err)}"}), 400
+
+    # Fetch updated names
+    folder_name, sheet_name = "N/A", "N/A"
+    try:
+        if session.get('drive_folder_id'):
+            folder_name = drive_srv.files().get(fileId=session['drive_folder_id'], fields="name").execute().get('name', 'Folder')
+        if session.get('spreadsheet_id'):
+            sheet_name = drive_srv.files().get(fileId=session['spreadsheet_id'], fields="name").execute().get('name', 'Sheet')
+    except Exception: pass
+
+    return jsonify({"success": True, "drive_folder_name": folder_name, "spreadsheet_name": sheet_name})
 
 @app.route('/api/auth/login')
 def login():
@@ -634,7 +840,6 @@ def oauth2callback():
         user_info = user_info_service.userinfo().get().execute()
         email = user_info.get('email')
 
-        # DYNAMIC USER REGISTRATION: Automatically append new Google authenticated users to ALLOWED_USERS
         if email:
             ALLOWED_USERS.add(email)
 
@@ -651,10 +856,17 @@ def oauth2callback():
         session['user_email'] = email
         save_creds_to_disk(creds_dict)
         
-        # Load user specific IDs or defaults
         user_cfg = DEFAULT_USER_CONFIGS.get(email, {})
         session['spreadsheet_id'] = user_cfg.get('spreadsheet_id', get_user_spreadsheet_id())
         session['drive_folder_id'] = user_cfg.get('drive_folder_id', get_user_drive_folder_id())
+
+        # Auto init spreadsheet upon login if provided
+        if session.get('spreadsheet_id'):
+            try:
+                _, sheets_srv, _ = get_google_services(creds_dict)
+                init_user_spreadsheet(sheets_srv, session['spreadsheet_id'])
+            except Exception as e:
+                print(f"Spreadsheet init on login notice: {e}")
 
         return redirect('/dashboard')
 
@@ -690,10 +902,15 @@ def patron_checkin():
     try:
         _, sheets_srv, _ = get_google_services(creds_to_use)
         
+        target_sheet_id = get_user_spreadsheet_id()
+        
+        # Ensure sheet sub-structure exists
+        init_user_spreadsheet(sheets_srv, target_sheet_id)
+
         new_row = [[name, email, phone, datetime.utcnow().isoformat(), embedding_json]]
         
         sheets_srv.spreadsheets().values().append(
-            spreadsheetId=get_user_spreadsheet_id(),
+            spreadsheetId=target_sheet_id,
             range="Sheet1!A:E",
             valueInputOption="USER_ENTERED",
             body={"values": new_row}
