@@ -75,7 +75,7 @@ def extract_face_embeddings(image_bytes):
     try:
         image = Image.open(io.BytesIO(image_bytes))
         
-        # FIX MOBILE ORIENTATION: Auto-rotate mobile camera selfies based on EXIF tags
+        # Auto-rotate mobile camera selfies based on EXIF orientation tags
         image = ImageOps.exif_transpose(image)
         
         image = image.convert('RGB')
@@ -84,7 +84,7 @@ def extract_face_embeddings(image_bytes):
         
         encodings = face_recognition.face_encodings(np_img)
         
-        # Fallback for smaller/harder faces on mobile camera sensors
+        # Fallback for smaller/distant faces
         if not encodings:
             encodings = face_recognition.face_encodings(np_img, number_of_times_to_upsample=2)
             
@@ -189,7 +189,7 @@ def checkin_form():
                 <div class="form-group"><label>Full Name *</label><input type="text" name="name" required></div>
                 <div class="form-group"><label>Email Address *</label><input type="email" name="email" required></div>
                 <div class="form-group"><label>Phone Number *</label><input type="tel" name="phone" required></div>
-                <div class="form-group"><label>Take/Upload Selfie *</label><input type="file" name="selfie" accept="image/*" capture="user" required></div>
+                <div class="form-group"><label>Take/Upload Selfie *</label><input type="file" name="selfie" accept="image/*" required></div>
                 <button type="submit" id="submitBtn" class="btn">Complete Check-In</button>
             </form>
             <div id="message"></div>
