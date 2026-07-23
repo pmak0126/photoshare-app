@@ -14,11 +14,22 @@ from googleapiclient.discovery import build
 import face_recognition
 from PIL import Image, ImageOps
 
-VERSION = "v3-facematch"
-ALLOWED_USERS = ["pranavcoolstar@gmail.com", "makwanapranav26@gmail.com"]
+VERSION = "v4-dynamic-users"
 
-SPREADSHEET_ID = "1gWWBNpKU1lIEz7RCiCycIqvg_QJKARqPJHbpIr78RvE"
-TARGET_DRIVE_FOLDER_ID = "1FBhdmP9xzKnD8-aCx5aJIV3jcgoujWIm"
+# Mutable set for dynamic authorization during server runtime
+ALLOWED_USERS = {"pranavcoolstar@gmail.com", "makwanapranav26@gmail.com"}
+
+# Default config mapping per user (Fallback defaults if not provided in session)
+DEFAULT_USER_CONFIGS = {
+    "pranavcoolstar@gmail.com": {
+        "spreadsheet_id": "1gWWBNpKU1lIEz7RCiCycIqvg_QJKARqPJHbpIr78RvE",
+        "drive_folder_id": "1FBhdmP9xzKnD8-aCx5aJIV3jcgoujWIm"
+    },
+    "makwanapranav26@gmail.com": {
+        "spreadsheet_id": "1gWWBNpKU1lIEz7RCiCycIqvg_QJKARqPJHbpIr78RvE",
+        "drive_folder_id": "1FBhdmP9xzKnD8-aCx5aJIV3jcgoujWIm"
+    }
+}
 
 TOKEN_FILE = "/tmp/google_tokens.json"
 
@@ -31,6 +42,12 @@ app.config.update(
 )
 
 system_creds_cache = None
+
+def get_user_spreadsheet_id():
+    return session.get('spreadsheet_id') or os.environ.get("SPREADSHEET_ID", "1gWWBNpKU1lIEz7RCiCycIqvg_QJKARqPJHbpIr78RvE")
+
+def get_user_drive_folder_id():
+    return session.get('drive_folder_id') or os.environ.get("TARGET_DRIVE_FOLDER_ID", "1FBhdmP9xzKnD8-aCx5aJIV3jcgoujWIm")
 
 @app.errorhandler(500)
 def handle_500_error(e):
@@ -74,17 +91,12 @@ def get_client_config():
 def extract_face_embeddings(image_bytes):
     try:
         image = Image.open(io.BytesIO(image_bytes))
-        
-        # Auto-rotate mobile camera selfies based on EXIF orientation tags
         image = ImageOps.exif_transpose(image)
-        
         image = image.convert('RGB')
         image.thumbnail((1200, 1200))
         np_img = np.array(image)
         
         encodings = face_recognition.face_encodings(np_img)
-        
-        # Fallback for smaller/distant faces
         if not encodings:
             encodings = face_recognition.face_encodings(np_img, number_of_times_to_upsample=2)
             
@@ -132,6 +144,15 @@ def send_photo_email(gmail_srv, recipient_email, recipient_name, photo_links):
     raw_msg = base64.urlsafe_b64encode(message.as_bytes()).decode("utf-8")
     gmail_srv.users().messages().send(userId="me", body={"raw": raw_msg}).execute()
 
+def make_file_public(drive_srv, file_id):
+    try:
+        drive_srv.permissions().create(
+            fileId=file_id,
+            body={'role': 'reader', 'type': 'anyone'}
+        ).execute()
+    except Exception as e:
+        print(f"Failed to set public view permission for {file_id}: {e}")
+
 @app.route('/')
 def home():
     return f'''
@@ -152,8 +173,7 @@ def home():
     <body>
         <h1>Photoshare Platform Live 📷</h1>
         <div class="card">
-            <p><strong>Environment:</strong> Cloud Run Live Backend</p>
-            <p><strong>Release Target:</strong> {VERSION}</p>
+            <p><strong>Environment:</strong> Cloud Run Live Backend ({VERSION})</p>
             <a href="/checkin" class="btn btn-success">Open Guest Check-In Form</a>
             <a href="/api/auth/login" class="btn">Go to Operations Dashboard</a>
         </div>
@@ -231,6 +251,8 @@ def dashboard():
         return "<h3>401 Unauthorized: Please log in first.</h3><a href='/api/auth/login'>Login</a>", 401
         
     email = session.get('user_email', 'Admin')
+    drive_id = get_user_drive_folder_id()
+    sheet_id = get_user_spreadsheet_id()
     
     html = '''
     <!DOCTYPE html>
@@ -259,7 +281,9 @@ def dashboard():
             .card-title { font-size: 16px; font-weight: 700; color: #111827; margin: 0 0 16px 0; display: flex; justify-content: space-between; align-items: center; }
             
             .search-input { width: 100%; padding: 10px 16px; border: 1px solid #d1d5db; border-radius: 8px; font-size: 14px; box-sizing: border-box; margin-bottom: 12px; }
-            
+            .config-bar { display: flex; gap: 10px; margin-bottom: 15px; background: #f8fafc; padding: 12px; border-radius: 8px; border: 1px solid #e2e8f0; }
+            .config-bar input { flex: 1; padding: 8px 12px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 13px; }
+
             .table-container { max-height: 340px; overflow-y: auto; border: 1px solid #f3f4f6; border-radius: 8px; }
             .data-table { width: 100%; border-collapse: collapse; text-align: left; }
             .data-table th { font-size: 11px; font-weight: 700; color: #6b7280; text-transform: uppercase; padding: 12px 16px; background: #f9fafb; position: sticky; top: 0; border-bottom: 1px solid #e5e7eb; }
@@ -286,8 +310,18 @@ def dashboard():
                 </div>
             </div>
 
+            <!-- Workspace Config Bar -->
+            <div class="card" style="padding: 16px 24px;">
+                <div style="font-size: 13px; font-weight: 600; margin-bottom: 8px; color: #475569;">Active User Resource Config</div>
+                <div class="config-bar">
+                    <input type="text" id="driveFolderInput" value="DRIVE_FOLDER_PLACEHOLDER" placeholder="Google Drive Folder ID">
+                    <input type="text" id="spreadsheetInput" value="SPREADSHEET_PLACEHOLDER" placeholder="Google Sheet ID">
+                    <button class="btn btn-light btn-sm" onclick="updateUserConfig()">Save Workspace IDs</button>
+                </div>
+            </div>
+
             <div class="card">
-                <div class="card-title">Grid 1: Event Folders (Mapped Folder ID: 1FBhdmP9xzKnD8-aCx5aJIV3jcgoujWIm)</div>
+                <div class="card-title">Grid 1: Event Folders</div>
                 <input type="text" id="folderSearchInput" class="search-input" onkeyup="filterGrid1()" placeholder="Search event folders by name...">
                 <div class="table-container">
                     <table class="data-table">
@@ -338,6 +372,26 @@ def dashboard():
         <script>
             let grid1Folders = [];
             let currentSelectedFolder = null;
+
+            async function updateUserConfig() {
+                const driveFolderId = document.getElementById('driveFolderInput').value.trim();
+                const spreadsheetId = document.getElementById('spreadsheetInput').value.trim();
+                
+                logConsole('Updating workspace config IDs...');
+                try {
+                    const res = await fetch('/api/admin/config', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ drive_folder_id: driveFolderId, spreadsheet_id: spreadsheetId })
+                    });
+                    const data = await res.json();
+                    if (data.error) throw new Error(data.error);
+                    logConsole('Workspace IDs updated successfully!');
+                    loadGrid1Folders();
+                } catch (err) {
+                    logConsole('ERROR updating config: ' + err.message);
+                }
+            }
 
             async function loadGrid1Folders() {
                 logConsole('Fetching subfolders from mapped Drive folder...');
@@ -500,7 +554,23 @@ def dashboard():
     </body>
     </html>
     '''
-    return html.replace('USER_EMAIL_PLACEHOLDER', email)
+    return html.replace('USER_EMAIL_PLACEHOLDER', email).replace('DRIVE_FOLDER_PLACEHOLDER', drive_id).replace('SPREADSHEET_PLACEHOLDER', sheet_id)
+
+@app.route('/api/admin/config', methods=['POST'])
+def api_update_config():
+    if 'credentials' not in session:
+        return jsonify({"error": "Unauthorized"}), 401
+    
+    data = request.get_json() or {}
+    drive_folder_id = data.get('drive_folder_id')
+    spreadsheet_id = data.get('spreadsheet_id')
+
+    if drive_folder_id:
+        session['drive_folder_id'] = drive_folder_id
+    if spreadsheet_id:
+        session['spreadsheet_id'] = spreadsheet_id
+
+    return jsonify({"success": True})
 
 @app.route('/api/auth/login')
 def login():
@@ -564,8 +634,9 @@ def oauth2callback():
         user_info = user_info_service.userinfo().get().execute()
         email = user_info.get('email')
 
-        if email not in ALLOWED_USERS:
-            return f"403 Forbidden: Identity Unauthorized ({email})", 403
+        # DYNAMIC USER REGISTRATION: Automatically append new Google authenticated users to ALLOWED_USERS
+        if email:
+            ALLOWED_USERS.add(email)
 
         creds_dict = {
             'token': creds.token,
@@ -580,6 +651,11 @@ def oauth2callback():
         session['user_email'] = email
         save_creds_to_disk(creds_dict)
         
+        # Load user specific IDs or defaults
+        user_cfg = DEFAULT_USER_CONFIGS.get(email, {})
+        session['spreadsheet_id'] = user_cfg.get('spreadsheet_id', get_user_spreadsheet_id())
+        session['drive_folder_id'] = user_cfg.get('drive_folder_id', get_user_drive_folder_id())
+
         return redirect('/dashboard')
 
     except Exception as e:
@@ -617,7 +693,7 @@ def patron_checkin():
         new_row = [[name, email, phone, datetime.utcnow().isoformat(), embedding_json]]
         
         sheets_srv.spreadsheets().values().append(
-            spreadsheetId=SPREADSHEET_ID,
+            spreadsheetId=get_user_spreadsheet_id(),
             range="Sheet1!A:E",
             valueInputOption="USER_ENTERED",
             body={"values": new_row}
@@ -634,11 +710,12 @@ def api_get_folders():
     
     try:
         drive_srv, sheets_srv, _ = get_google_services(session['credentials'])
+        target_folder_id = get_user_drive_folder_id()
         
         try:
-            root_folder = drive_srv.files().get(fileId=TARGET_DRIVE_FOLDER_ID, fields="id, name").execute()
+            root_folder = drive_srv.files().get(fileId=target_folder_id, fields="id, name").execute()
         except Exception as err:
-            return jsonify({"error": f"Unable to access Drive Folder ID ({TARGET_DRIVE_FOLDER_ID}). Details: {str(err)}"}), 400
+            return jsonify({"error": f"Unable to access Drive Folder ID ({target_folder_id}). Details: {str(err)}"}), 400
 
         photoz_id = root_folder['id']
         
@@ -661,7 +738,7 @@ def api_get_folders():
             
             patron_count = 0
             try:
-                sheet_data = sheets_srv.spreadsheets().values().get(spreadsheetId=SPREADSHEET_ID, range="matchedfaces!A2:G").execute()
+                sheet_data = sheets_srv.spreadsheets().values().get(spreadsheetId=get_user_spreadsheet_id(), range="matchedfaces!A2:G").execute()
                 rows = sheet_data.get('values', [])
                 matched_patrons = set(r[2] for r in rows if len(r) >= 3 and r[0] == folder_id)
                 patron_count = len(matched_patrons)
@@ -694,7 +771,7 @@ def api_matched_patrons():
         matched_data = []
         try:
             matched_res = sheets_srv.spreadsheets().values().get(
-                spreadsheetId=SPREADSHEET_ID, 
+                spreadsheetId=get_user_spreadsheet_id(), 
                 range="matchedfaces!A2:G"
             ).execute()
             matched_data = matched_res.get('values', [])
@@ -739,7 +816,7 @@ def api_process_folder():
 
         patron_data = []
         try:
-            p_res = sheets_srv.spreadsheets().values().get(spreadsheetId=SPREADSHEET_ID, range="Sheet1!A2:E").execute()
+            p_res = sheets_srv.spreadsheets().values().get(spreadsheetId=get_user_spreadsheet_id(), range="Sheet1!A2:E").execute()
             patron_data = p_res.get('values', [])
         except Exception:
             patron_data = []
@@ -771,12 +848,18 @@ def api_process_folder():
                 img_encodings = extract_face_embeddings(img_content)
                 img_link = img.get('webViewLink', f"https://drive.google.com/file/d/{img['id']}/view")
 
+                is_matched = False
                 for face_enc in img_encodings:
                     for patron in known_patrons:
                         distance = face_recognition.face_distance([patron['encoding']], face_enc)[0]
                         if distance <= 0.6:
                             if img_link not in patron['matched_links']:
                                 patron['matched_links'].append(img_link)
+                                is_matched = True
+
+                if is_matched:
+                    make_file_public(drive_srv, img['id'])
+
             except Exception as file_err:
                 print(f"Error processing image {img['id']}: {file_err}")
                 continue
@@ -801,7 +884,7 @@ def api_process_folder():
 
         if new_matched_rows:
             sheets_srv.spreadsheets().values().append(
-                spreadsheetId=SPREADSHEET_ID,
+                spreadsheetId=get_user_spreadsheet_id(),
                 range="matchedfaces!A:G",
                 valueInputOption="USER_ENTERED",
                 body={"values": new_matched_rows}
@@ -824,9 +907,9 @@ def api_share_single():
         return jsonify({"error": "Missing folder_id or email"}), 400
 
     try:
-        _, sheets_srv, gmail_srv = get_google_services(session['credentials'])
+        drive_srv, sheets_srv, gmail_srv = get_google_services(session['credentials'])
         
-        res = sheets_srv.spreadsheets().values().get(spreadsheetId=SPREADSHEET_ID, range="matchedfaces!A2:G").execute()
+        res = sheets_srv.spreadsheets().values().get(spreadsheetId=get_user_spreadsheet_id(), range="matchedfaces!A2:G").execute()
         rows = res.get('values', [])
 
         target_row = None
@@ -840,6 +923,11 @@ def api_share_single():
 
         name = target_row[1]
         links = target_row[5].split("\n")
+
+        for link in links:
+            if "/file/d/" in link:
+                file_id = link.split("/file/d/")[1].split("/")[0]
+                make_file_public(drive_srv, file_id)
 
         send_photo_email(gmail_srv, target_email, name, links)
         return jsonify({"success": True, "status": f"Email successfully dispatched to {target_email}"})
@@ -858,9 +946,9 @@ def api_share_all():
         return jsonify({"error": "Missing folder_id"}), 400
 
     try:
-        _, sheets_srv, gmail_srv = get_google_services(session['credentials'])
+        drive_srv, sheets_srv, gmail_srv = get_google_services(session['credentials'])
         
-        res = sheets_srv.spreadsheets().values().get(spreadsheetId=SPREADSHEET_ID, range="matchedfaces!A2:G").execute()
+        res = sheets_srv.spreadsheets().values().get(spreadsheetId=get_user_spreadsheet_id(), range="matchedfaces!A2:G").execute()
         rows = res.get('values', [])
 
         sent_count = 0
@@ -870,6 +958,11 @@ def api_share_all():
                 email = r[2]
                 links = r[5].split("\n")
                 
+                for link in links:
+                    if "/file/d/" in link:
+                        file_id = link.split("/file/d/")[1].split("/")[0]
+                        make_file_public(drive_srv, file_id)
+
                 try:
                     send_photo_email(gmail_srv, email, name, links)
                     sent_count += 1
