@@ -9,23 +9,21 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from flask import Flask, request, jsonify, redirect, session, url_for
 from google.oauth2.credentials import Credentials
+from google.auth.transport.requests import Request
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 import face_recognition
 from PIL import Image, ImageOps
 
-VERSION = "v4-picker-autoinit"
+VERSION = "v4-mobile-fix"
 
 ALLOWED_USERS = {"pranavcoolstar@gmail.com", "makwanapranav26@gmail.com"}
 
-DEFAULT_USER_CONFIGS = {
-    "pranavcoolstar@gmail.com": {
-        "spreadsheet_id": "1gWWBNpKU1lIEz7RCiCycIqvg_QJKARqPJHbpIr78RvE",
-        "drive_folder_id": "1FBhdmP9xzKnD8-aCx5aJIV3jcgoujWIm"
-    }
-}
-
 TOKEN_FILE = "/tmp/google_tokens.json"
+WORKSPACE_FILE = "/tmp/active_workspace.json"
+
+DEFAULT_SPREADSHEET_ID = "1gWWBNpKU1lIEz7RCiCycIqvg_QJKARqPJHbpIr78RvE"
+DEFAULT_DRIVE_FOLDER_ID = "1FBhdmP9xzKnD8-aCx5aJIV3jcgoujWIm"
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", "super_secret_dev_key")
@@ -36,6 +34,27 @@ app.config.update(
 )
 
 system_creds_cache = None
+
+def save_workspace_config(sheet_id, folder_id):
+    try:
+        with open(WORKSPACE_FILE, 'w') as f:
+            json.dump({"spreadsheet_id": sheet_id, "drive_folder_id": folder_id}, f)
+    except Exception as e:
+        print(f"Failed to persist workspace config: {e}")
+
+def load_workspace_config():
+    if os.path.exists(WORKSPACE_FILE):
+        try:
+            with open(WORKSPACE_FILE, 'r') as f:
+                return json.load(f)
+        except Exception: pass
+    return {"spreadsheet_id": DEFAULT_SPREADSHEET_ID, "drive_folder_id": DEFAULT_DRIVE_FOLDER_ID}
+
+def get_user_spreadsheet_id():
+    return session.get('spreadsheet_id') or load_workspace_config().get('spreadsheet_id', DEFAULT_SPREADSHEET_ID)
+
+def get_user_drive_folder_id():
+    return session.get('drive_folder_id') or load_workspace_config().get('drive_folder_id', DEFAULT_DRIVE_FOLDER_ID)
 
 def save_creds_to_disk(creds_dict):
     global system_creds_cache
@@ -48,22 +67,43 @@ def save_creds_to_disk(creds_dict):
 
 def load_creds():
     global system_creds_cache
+    creds_dict = None
     if system_creds_cache:
-        return system_creds_cache
-    if os.path.exists(TOKEN_FILE):
+        creds_dict = system_creds_cache
+    elif os.path.exists(TOKEN_FILE):
         try:
             with open(TOKEN_FILE, 'r') as f:
-                system_creds_cache = json.load(f)
-                return system_creds_cache
-        except Exception:
-            pass
+                creds_dict = json.load(f)
+                system_creds_cache = creds_dict
+        except Exception: pass
+
+    if creds_dict:
+        client_config, _ = get_client_config()
+        if client_config and 'web' in client_config:
+            creds_dict['client_id'] = client_config['web']['client_id']
+            creds_dict['client_secret'] = client_config['web']['client_secret']
+            creds_dict['token_uri'] = client_config['web'].get('token_uri', 'https://oauth2.googleapis.com/token')
+        
+        creds = Credentials.from_authorized_user_info(creds_dict)
+        
+        # Auto-refresh token if expired
+        if creds and creds.expired and creds.refresh_token:
+            try:
+                creds.refresh(Request())
+                refreshed_dict = {
+                    'token': creds.token,
+                    'refresh_token': creds.refresh_token,
+                    'token_uri': creds.token_uri,
+                    'client_id': creds.client_id,
+                    'client_secret': creds.client_secret,
+                    'scopes': creds.scopes
+                }
+                save_creds_to_disk(refreshed_dict)
+            except Exception as ref_err:
+                print(f"Failed to auto-refresh token: {ref_err}")
+
+        return creds_dict
     return None
-
-def get_user_spreadsheet_id():
-    return session.get('spreadsheet_id') or os.environ.get("SPREADSHEET_ID", "1gWWBNpKU1lIEz7RCiCycIqvg_QJKARqPJHbpIr78RvE")
-
-def get_user_drive_folder_id():
-    return session.get('drive_folder_id') or os.environ.get("TARGET_DRIVE_FOLDER_ID", "1FBhdmP9xzKnD8-aCx5aJIV3jcgoujWIm")
 
 def get_client_config():
     if os.path.exists('client_secret.json'):
@@ -103,36 +143,30 @@ def get_google_services(creds_dict):
         creds_dict['token_uri'] = client_config['web'].get('token_uri', 'https://oauth2.googleapis.com/token')
 
     creds = Credentials.from_authorized_user_info(creds_dict)
+    if creds and creds.expired and creds.refresh_token:
+        try:
+            creds.refresh(Request())
+        except Exception: pass
+
     drive_service = build('drive', 'v3', credentials=creds)
     sheets_service = build('sheets', 'v4', credentials=creds)
     gmail_service = build('gmail', 'v1', credentials=creds)
     return drive_service, sheets_service, gmail_service
 
 def init_user_spreadsheet(sheets_srv, spreadsheet_id):
-    """Auto-creates Sheet1 and matchedfaces sub-sheets with required headers if missing."""
     try:
         spreadsheet = sheets_srv.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
         existing_sheets = [s['properties']['title'] for s in spreadsheet.get('sheets', [])]
 
         requests = []
-        
         if 'Sheet1' not in existing_sheets:
-            requests.append({
-                'addSheet': {'properties': {'title': 'Sheet1'}}
-            })
-            
+            requests.append({'addSheet': {'properties': {'title': 'Sheet1'}}})
         if 'matchedfaces' not in existing_sheets:
-            requests.append({
-                'addSheet': {'properties': {'title': 'matchedfaces'}}
-            })
+            requests.append({'addSheet': {'properties': {'title': 'matchedfaces'}}})
 
         if requests:
-            sheets_srv.spreadsheets().batchUpdate(
-                spreadsheetId=spreadsheet_id,
-                body={'requests': requests}
-            ).execute()
+            sheets_srv.spreadsheets().batchUpdate(spreadsheetId=spreadsheet_id, body={'requests': requests}).execute()
 
-        # Initialize Sheet1 Headers
         try:
             s1_val = sheets_srv.spreadsheets().values().get(spreadsheetId=spreadsheet_id, range="Sheet1!A1:E1").execute()
             if not s1_val.get('values'):
@@ -142,10 +176,8 @@ def init_user_spreadsheet(sheets_srv, spreadsheet_id):
                     valueInputOption="USER_ENTERED",
                     body={"values": [["Name", "Email", "Phone", "Timestamp", "Face Encoding JSON string"]]}
                 ).execute()
-        except Exception as e:
-            print(f"Error initializing Sheet1 headers: {e}")
+        except Exception: pass
 
-        # Initialize matchedfaces Headers
         try:
             mf_val = sheets_srv.spreadsheets().values().get(spreadsheetId=spreadsheet_id, range="matchedfaces!A1:G1").execute()
             if not mf_val.get('values'):
@@ -155,8 +187,7 @@ def init_user_spreadsheet(sheets_srv, spreadsheet_id):
                     valueInputOption="USER_ENTERED",
                     body={"values": [["Folder_ID", "Name", "Email", "Phone", "Match_Count", "Photo_Links", "Delivered_At"]]}
                 ).execute()
-        except Exception as e:
-            print(f"Error initializing matchedfaces headers: {e}")
+        except Exception: pass
 
     except Exception as e:
         print(f"Failed to auto-initialize spreadsheet {spreadsheet_id}: {e}")
@@ -241,7 +272,7 @@ def checkin_form():
             label { display: block; font-weight: 500; margin-bottom: 6px; }
             input[type="text"], input[type="email"], input[type="tel"] { width: 100%; padding: 10px; border: 1px solid #ced4da; border-radius: 6px; box-sizing: border-box; }
             .btn { width: 100%; background: #007BFF; color: white; border: none; padding: 12px; border-radius: 6px; font-weight: bold; cursor: pointer; }
-            #message { margin-top: 20px; padding: 12px; border-radius: 6px; display: none; text-align: center; }
+            #message { margin-top: 20px; padding: 12px; border-radius: 6px; display: none; text-align: center; word-break: break-word; }
             .success { background: #d4edda; color: #155724; }
             .error { background: #f8d7da; color: #721c24; }
         </style>
@@ -253,7 +284,7 @@ def checkin_form():
                 <div class="form-group"><label>Full Name *</label><input type="text" name="name" required></div>
                 <div class="form-group"><label>Email Address *</label><input type="email" name="email" required></div>
                 <div class="form-group"><label>Phone Number *</label><input type="tel" name="phone" required></div>
-                <div class="form-group"><label>Take/Upload Selfie *</label><input type="file" name="selfie" accept="image/*" required></div>
+                <div class="form-group"><label>Take/Upload Selfie *</label><input type="file" name="selfie" accept="image/*" capture="user" required></div>
                 <button type="submit" id="submitBtn" class="btn">Complete Check-In</button>
             </form>
             <div id="message"></div>
@@ -342,7 +373,6 @@ def dashboard():
             .console-box { background: #0b1329; color: #e2e8f0; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; padding: 16px; border-radius: 10px; font-size: 13px; line-height: 1.6; max-height: 160px; overflow-y: auto; }
             .console-line { margin: 0; }
 
-            /* Modal Styles */
             .modal-backdrop { position: fixed; top:0; left:0; width:100vw; height:100vh; background: rgba(0,0,0,0.5); display:none; justify-content:center; align-items:center; z-index:9999; }
             .modal-box { background: white; padding: 24px; border-radius: 12px; width: 500px; max-width: 90%; max-height: 80vh; display: flex; flex-direction: column; gap: 12px; }
             .modal-list { max-height: 300px; overflow-y: auto; border: 1px solid #e2e8f0; border-radius: 6px; }
@@ -364,7 +394,6 @@ def dashboard():
                 </div>
             </div>
 
-            <!-- Workspace Config Section with Browse Buttons -->
             <div class="card" style="padding: 16px 24px;">
                 <div style="font-size: 14px; font-weight: 700; margin-bottom: 12px; color: #1e293b;">Active User Resource Config</div>
                 <div class="config-section">
@@ -435,7 +464,6 @@ def dashboard():
             </div>
         </div>
 
-        <!-- Drive/Sheet Picker Modal -->
         <div id="pickerModal" class="modal-backdrop">
             <div class="modal-box">
                 <div style="display:flex; justify-content:space-between; align-items:center;">
@@ -758,16 +786,16 @@ def api_update_config():
     if spreadsheet_id:
         session['spreadsheet_id'] = spreadsheet_id
 
+    save_workspace_config(get_user_spreadsheet_id(), get_user_drive_folder_id())
+
     drive_srv, sheets_srv, _ = get_google_services(session['credentials'])
     
-    # Auto initialize sub-sheets in user's target spreadsheet
     if spreadsheet_id:
         try:
             init_user_spreadsheet(sheets_srv, spreadsheet_id)
         except Exception as err:
             return jsonify({"error": f"Failed to initialize sub-sheets in target Google Sheet: {str(err)}"}), 400
 
-    # Fetch updated names
     folder_name, sheet_name = "N/A", "N/A"
     try:
         if session.get('drive_folder_id'):
@@ -855,12 +883,7 @@ def oauth2callback():
         session['credentials'] = creds_dict
         session['user_email'] = email
         save_creds_to_disk(creds_dict)
-        
-        user_cfg = DEFAULT_USER_CONFIGS.get(email, {})
-        session['spreadsheet_id'] = user_cfg.get('spreadsheet_id', get_user_spreadsheet_id())
-        session['drive_folder_id'] = user_cfg.get('drive_folder_id', get_user_drive_folder_id())
 
-        # Auto init spreadsheet upon login if provided
         if session.get('spreadsheet_id'):
             try:
                 _, sheets_srv, _ = get_google_services(creds_dict)
@@ -901,10 +924,8 @@ def patron_checkin():
 
     try:
         _, sheets_srv, _ = get_google_services(creds_to_use)
-        
         target_sheet_id = get_user_spreadsheet_id()
         
-        # Ensure sheet sub-structure exists
         init_user_spreadsheet(sheets_srv, target_sheet_id)
 
         new_row = [[name, email, phone, datetime.utcnow().isoformat(), embedding_json]]
