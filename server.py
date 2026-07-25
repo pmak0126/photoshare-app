@@ -15,7 +15,7 @@ from googleapiclient.discovery import build
 import face_recognition
 from PIL import Image, ImageOps
 
-VERSION = "v4-mobile-fix"
+VERSION = "v4-camera-ui"
 
 ALLOWED_USERS = {"pranavcoolstar@gmail.com", "makwanapranav26@gmail.com"}
 
@@ -86,7 +86,6 @@ def load_creds():
         
         creds = Credentials.from_authorized_user_info(creds_dict)
         
-        # Auto-refresh token if expired
         if creds and creds.expired and creds.refresh_token:
             try:
                 creds.refresh(Request())
@@ -272,6 +271,33 @@ def checkin_form():
             label { display: block; font-weight: 500; margin-bottom: 6px; }
             input[type="text"], input[type="email"], input[type="tel"] { width: 100%; padding: 10px; border: 1px solid #ced4da; border-radius: 6px; box-sizing: border-box; }
             .btn { width: 100%; background: #007BFF; color: white; border: none; padding: 12px; border-radius: 6px; font-weight: bold; cursor: pointer; }
+            
+            .btn-camera {
+                background: #f1f5f9;
+                color: #007BFF;
+                border: 2px dashed #007BFF;
+                padding: 12px;
+                border-radius: 8px;
+                font-weight: 600;
+                font-size: 14px;
+                cursor: pointer;
+                width: 100%;
+                box-sizing: border-box;
+                text-align: center;
+                transition: all 0.2s ease;
+            }
+            .btn-camera:hover {
+                background: #e2e8f0;
+            }
+            .file-selected-text {
+                margin-top: 6px;
+                font-size: 13px;
+                color: #10b981;
+                font-weight: 500;
+                display: none;
+                text-align: center;
+            }
+
             #message { margin-top: 20px; padding: 12px; border-radius: 6px; display: none; text-align: center; word-break: break-word; }
             .success { background: #d4edda; color: #155724; }
             .error { background: #f8d7da; color: #721c24; }
@@ -284,12 +310,29 @@ def checkin_form():
                 <div class="form-group"><label>Full Name *</label><input type="text" name="name" required></div>
                 <div class="form-group"><label>Email Address *</label><input type="email" name="email" required></div>
                 <div class="form-group"><label>Phone Number *</label><input type="tel" name="phone" required></div>
-                <div class="form-group"><label>Take/Upload Selfie *</label><input type="file" name="selfie" accept="image/*" capture="user" required></div>
+                
+                <div class="form-group">
+                    <label>Take Selfie *</label>
+                    <input type="file" id="selfieInput" name="selfie" accept="image/*" capture="user" style="display: none;" required>
+                    <button type="button" class="btn-camera" onclick="document.getElementById('selfieInput').click()">📷 Open Camera</button>
+                    <div id="fileSelectedDisplay" class="file-selected-text"></div>
+                </div>
+
                 <button type="submit" id="submitBtn" class="btn">Complete Check-In</button>
             </form>
             <div id="message"></div>
         </div>
         <script>
+            document.getElementById('selfieInput').addEventListener('change', function() {
+                const fileDisplay = document.getElementById('fileSelectedDisplay');
+                if (this.files && this.files[0]) {
+                    fileDisplay.innerText = '✓ Photo captured: ' + this.files[0].name;
+                    fileDisplay.style.display = 'block';
+                } else {
+                    fileDisplay.style.display = 'none';
+                }
+            });
+
             document.getElementById('checkinForm').addEventListener('submit', async function(e) {
                 e.preventDefault();
                 const submitBtn = document.getElementById('submitBtn');
@@ -305,6 +348,7 @@ def checkin_form():
                         messageDiv.innerHTML = '🎉 Check-in logged successfully with face encoding!';
                         messageDiv.style.display = 'block';
                         this.reset();
+                        document.getElementById('fileSelectedDisplay').style.display = 'none';
                     } else { throw new Error(result.error || 'Server error'); }
                 } catch (err) {
                     messageDiv.className = 'error';
