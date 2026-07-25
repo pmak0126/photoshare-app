@@ -5,41 +5,113 @@ import io
 import numpy as np
 import traceback
 from datetime import datetime
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 from flask import Flask, request, jsonify, redirect, session, url_for
 from google.oauth2.credentials import Credentials
+from google.auth.transport.requests import Request
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 import face_recognition
-from PIL import Image
+from PIL import Image, ImageOps
 
-VERSION = "v3-facematch"
-ALLOWED_USERS = ["pranavcoolstar@gmail.com", "makwanapranav26@gmail.com"]
+VERSION = "v4-camera-ui"
 
-SPREADSHEET_ID = "1gWWBNpKU1lIEz7RCiCycIqvg_QJKARqPJHbpIr78RvE"
-TARGET_DRIVE_FOLDER_ID = "1FBhdmP9xzKnD8-aCx5aJIV3jcgoujWIm"
+ALLOWED_USERS = {"pranavcoolstar@gmail.com", "makwanapranav26@gmail.com"}
+
+TOKEN_FILE = "/tmp/google_tokens.json"
+WORKSPACE_FILE = "/tmp/active_workspace.json"
+
+DEFAULT_SPREADSHEET_ID = "1gWWBNpKU1lIEz7RCiCycIqvg_QJKARqPJHbpIr78RvE"
+DEFAULT_DRIVE_FOLDER_ID = "1FBhdmP9xzKnD8-aCx5aJIV3jcgoujWIm"
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", "super_secret_dev_key")
 app.config.update(
     SESSION_COOKIE_SECURE=True,
     SESSION_COOKIE_HTTPONLY=True,
-    SESSION_COOKIE_SAMESITE="None",
+    SESSION_COOKIE_SAMESITE='None',
 )
 
 system_creds_cache = None
 
-@app.errorhandler(500)
-def handle_500_error(e):
-    return f"<h1>500 Internal Server Error (Diagnostic Catch)</h1><pre>{traceback.format_exc()}</pre>", 500
+def save_workspace_config(sheet_id, folder_id):
+    try:
+        with open(WORKSPACE_FILE, 'w') as f:
+            json.dump({"spreadsheet_id": sheet_id, "drive_folder_id": folder_id}, f)
+    except Exception as e:
+        print(f"Failed to persist workspace config: {e}")
+
+def load_workspace_config():
+    if os.path.exists(WORKSPACE_FILE):
+        try:
+            with open(WORKSPACE_FILE, 'r') as f:
+                return json.load(f)
+        except Exception: pass
+    return {"spreadsheet_id": DEFAULT_SPREADSHEET_ID, "drive_folder_id": DEFAULT_DRIVE_FOLDER_ID}
+
+def get_user_spreadsheet_id():
+    return session.get('spreadsheet_id') or load_workspace_config().get('spreadsheet_id', DEFAULT_SPREADSHEET_ID)
+
+def get_user_drive_folder_id():
+    return session.get('drive_folder_id') or load_workspace_config().get('drive_folder_id', DEFAULT_DRIVE_FOLDER_ID)
+
+def save_creds_to_disk(creds_dict):
+    global system_creds_cache
+    system_creds_cache = creds_dict
+    try:
+        with open(TOKEN_FILE, 'w') as f:
+            json.dump(creds_dict, f)
+    except Exception as e:
+        print(f"Failed to persist tokens to disk: {e}")
+
+def load_creds():
+    global system_creds_cache
+    creds_dict = None
+    if system_creds_cache:
+        creds_dict = system_creds_cache
+    elif os.path.exists(TOKEN_FILE):
+        try:
+            with open(TOKEN_FILE, 'r') as f:
+                creds_dict = json.load(f)
+                system_creds_cache = creds_dict
+        except Exception: pass
+
+    if creds_dict:
+        client_config, _ = get_client_config()
+        if client_config and 'web' in client_config:
+            creds_dict['client_id'] = client_config['web']['client_id']
+            creds_dict['client_secret'] = client_config['web']['client_secret']
+            creds_dict['token_uri'] = client_config['web'].get('token_uri', 'https://oauth2.googleapis.com/token')
+        
+        creds = Credentials.from_authorized_user_info(creds_dict)
+        
+        if creds and creds.expired and creds.refresh_token:
+            try:
+                creds.refresh(Request())
+                refreshed_dict = {
+                    'token': creds.token,
+                    'refresh_token': creds.refresh_token,
+                    'token_uri': creds.token_uri,
+                    'client_id': creds.client_id,
+                    'client_secret': creds.client_secret,
+                    'scopes': creds.scopes
+                }
+                save_creds_to_disk(refreshed_dict)
+            except Exception as ref_err:
+                print(f"Failed to auto-refresh token: {ref_err}")
+
+        return creds_dict
+    return None
 
 def get_client_config():
-    if os.path.exists("client_secret.json"):
-        with open("client_secret.json", "r") as f:
-            return json.load(f), "client_secret.json"
-    env_secrets = os.environ.get("CLIENT_SECRET_JSON")
+    if os.path.exists('client_secret.json'):
+        with open('client_secret.json', 'r') as f:
+            return json.load(f), 'client_secret.json'
+    env_secrets = os.environ.get('CLIENT_SECRET_JSON')
     if env_secrets:
         try:
-            decoded = base64.b64decode(env_secrets).decode("utf-8")
+            decoded = base64.b64decode(env_secrets).decode('utf-8')
             return json.loads(decoded), None
         except Exception:
             return json.loads(env_secrets), None
@@ -48,10 +120,15 @@ def get_client_config():
 def extract_face_embeddings(image_bytes):
     try:
         image = Image.open(io.BytesIO(image_bytes))
-        image = image.convert("RGB")
-        image.thumbnail((1000, 1000))
+        image = ImageOps.exif_transpose(image)
+        image = image.convert('RGB')
+        image.thumbnail((1200, 1200))
         np_img = np.array(image)
+        
         encodings = face_recognition.face_encodings(np_img)
+        if not encodings:
+            encodings = face_recognition.face_encodings(np_img, number_of_times_to_upsample=2)
+            
         return encodings
     except Exception as e:
         print(f"Error extracting face embedding: {e}")
@@ -59,20 +136,100 @@ def extract_face_embeddings(image_bytes):
 
 def get_google_services(creds_dict):
     client_config, _ = get_client_config()
-    if client_config and "web" in client_config:
-        creds_dict["client_id"] = client_config["web"]["client_id"]
-        creds_dict["client_secret"] = client_config["web"]["client_secret"]
-        creds_dict["token_uri"] = client_config["web"].get("token_uri", "https://oauth2.googleapis.com/token")
+    if client_config and 'web' in client_config:
+        creds_dict['client_id'] = client_config['web']['client_id']
+        creds_dict['client_secret'] = client_config['web']['client_secret']
+        creds_dict['token_uri'] = client_config['web'].get('token_uri', 'https://oauth2.googleapis.com/token')
 
     creds = Credentials.from_authorized_user_info(creds_dict)
-    drive_service = build("drive", "v3", credentials=creds)
-    sheets_service = build("sheets", "v4", credentials=creds)
-    gmail_service = build("gmail", "v1", credentials=creds)
+    if creds and creds.expired and creds.refresh_token:
+        try:
+            creds.refresh(Request())
+        except Exception: pass
+
+    drive_service = build('drive', 'v3', credentials=creds)
+    sheets_service = build('sheets', 'v4', credentials=creds)
+    gmail_service = build('gmail', 'v1', credentials=creds)
     return drive_service, sheets_service, gmail_service
 
-@app.route("/")
+def init_user_spreadsheet(sheets_srv, spreadsheet_id):
+    try:
+        spreadsheet = sheets_srv.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
+        existing_sheets = [s['properties']['title'] for s in spreadsheet.get('sheets', [])]
+
+        requests = []
+        if 'Sheet1' not in existing_sheets:
+            requests.append({'addSheet': {'properties': {'title': 'Sheet1'}}})
+        if 'matchedfaces' not in existing_sheets:
+            requests.append({'addSheet': {'properties': {'title': 'matchedfaces'}}})
+
+        if requests:
+            sheets_srv.spreadsheets().batchUpdate(spreadsheetId=spreadsheet_id, body={'requests': requests}).execute()
+
+        try:
+            s1_val = sheets_srv.spreadsheets().values().get(spreadsheetId=spreadsheet_id, range="Sheet1!A1:E1").execute()
+            if not s1_val.get('values'):
+                sheets_srv.spreadsheets().values().update(
+                    spreadsheetId=spreadsheet_id,
+                    range="Sheet1!A1:E1",
+                    valueInputOption="USER_ENTERED",
+                    body={"values": [["Name", "Email", "Phone", "Timestamp", "Face Encoding JSON string"]]}
+                ).execute()
+        except Exception: pass
+
+        try:
+            mf_val = sheets_srv.spreadsheets().values().get(spreadsheetId=spreadsheet_id, range="matchedfaces!A1:G1").execute()
+            if not mf_val.get('values'):
+                sheets_srv.spreadsheets().values().update(
+                    spreadsheetId=spreadsheet_id,
+                    range="matchedfaces!A1:G1",
+                    valueInputOption="USER_ENTERED",
+                    body={"values": [["Folder_ID", "Name", "Email", "Phone", "Match_Count", "Photo_Links", "Delivered_At"]]}
+                ).execute()
+        except Exception: pass
+
+    except Exception as e:
+        print(f"Failed to auto-initialize spreadsheet {spreadsheet_id}: {e}")
+        raise e
+
+def send_photo_email(gmail_srv, recipient_email, recipient_name, photo_links):
+    message = MIMEMultipart("alternative")
+    message["To"] = recipient_email
+    message["Subject"] = f"📷 Your Photos are Ready, {recipient_name}!"
+
+    links_html = "".join([f'<li><a href="{link}" target="_blank">{link}</a></li>' for link in photo_links])
+    count = len(photo_links)
+    
+    html_content = f"""
+    <html>
+    <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+        <h2>Hello {recipient_name}! 👋</h2>
+        <p>We found <strong>{count} photo(s)</strong> matching your facial recognition check-in from your recent event.</p>
+        <p>Click the links below to view and download your photos directly from Google Drive:</p>
+        <ul>
+            {links_html}
+        </ul>
+        <br>
+        <p>Best regards,<br><strong>Photoshare System Team</strong></p>
+    </body>
+    </html>
+    """
+    message.attach(MIMEText(html_content, "html"))
+    raw_msg = base64.urlsafe_b64encode(message.as_bytes()).decode("utf-8")
+    gmail_srv.users().messages().send(userId="me", body={"raw": raw_msg}).execute()
+
+def make_file_public(drive_srv, file_id):
+    try:
+        drive_srv.permissions().create(
+            fileId=file_id,
+            body={'role': 'reader', 'type': 'anyone'}
+        ).execute()
+    except Exception as e:
+        print(f"Failed to set public view permission for {file_id}: {e}")
+
+@app.route('/')
 def home():
-    return f"""
+    return f'''
     <!DOCTYPE html>
     <html>
     <head>
@@ -90,18 +247,17 @@ def home():
     <body>
         <h1>Photoshare Platform Live 📷</h1>
         <div class="card">
-            <p><strong>Environment:</strong> Cloud Run Live Backend</p>
-            <p><strong>Release Target:</strong> {VERSION}</p>
+            <p><strong>Environment:</strong> Cloud Run Live Backend ({VERSION})</p>
             <a href="/checkin" class="btn btn-success">Open Guest Check-In Form</a>
             <a href="/api/auth/login" class="btn">Go to Operations Dashboard</a>
         </div>
     </body>
     </html>
-    """
+    '''
 
-@app.route("/checkin")
+@app.route('/checkin')
 def checkin_form():
-    return """
+    return '''
     <!DOCTYPE html>
     <html>
     <head>
@@ -115,7 +271,34 @@ def checkin_form():
             label { display: block; font-weight: 500; margin-bottom: 6px; }
             input[type="text"], input[type="email"], input[type="tel"] { width: 100%; padding: 10px; border: 1px solid #ced4da; border-radius: 6px; box-sizing: border-box; }
             .btn { width: 100%; background: #007BFF; color: white; border: none; padding: 12px; border-radius: 6px; font-weight: bold; cursor: pointer; }
-            #message { margin-top: 20px; padding: 12px; border-radius: 6px; display: none; text-align: center; }
+            
+            .btn-camera {
+                background: #f1f5f9;
+                color: #007BFF;
+                border: 2px dashed #007BFF;
+                padding: 12px;
+                border-radius: 8px;
+                font-weight: 600;
+                font-size: 14px;
+                cursor: pointer;
+                width: 100%;
+                box-sizing: border-box;
+                text-align: center;
+                transition: all 0.2s ease;
+            }
+            .btn-camera:hover {
+                background: #e2e8f0;
+            }
+            .file-selected-text {
+                margin-top: 6px;
+                font-size: 13px;
+                color: #10b981;
+                font-weight: 500;
+                display: none;
+                text-align: center;
+            }
+
+            #message { margin-top: 20px; padding: 12px; border-radius: 6px; display: none; text-align: center; word-break: break-word; }
             .success { background: #d4edda; color: #155724; }
             .error { background: #f8d7da; color: #721c24; }
         </style>
@@ -127,46 +310,70 @@ def checkin_form():
                 <div class="form-group"><label>Full Name *</label><input type="text" name="name" required></div>
                 <div class="form-group"><label>Email Address *</label><input type="email" name="email" required></div>
                 <div class="form-group"><label>Phone Number *</label><input type="tel" name="phone" required></div>
-                <div class="form-group"><label>Take/Upload Selfie *</label><input type="file" name="selfie" accept="image/*" required></div>
+                
+                <div class="form-group">
+                    <label>Take Selfie *</label>
+                    <input type="file" id="selfieInput" name="selfie" accept="image/*" capture="user" style="display: none;" required>
+                    <button type="button" class="btn-camera" onclick="document.getElementById('selfieInput').click()">📷 Open Camera</button>
+                    <div id="fileSelectedDisplay" class="file-selected-text"></div>
+                </div>
+
                 <button type="submit" id="submitBtn" class="btn">Complete Check-In</button>
             </form>
             <div id="message"></div>
         </div>
         <script>
-            document.getElementById("checkinForm").addEventListener("submit", async function(e) {
+            document.getElementById('selfieInput').addEventListener('change', function() {
+                const fileDisplay = document.getElementById('fileSelectedDisplay');
+                if (this.files && this.files[0]) {
+                    fileDisplay.innerText = '✓ Photo captured: ' + this.files[0].name;
+                    fileDisplay.style.display = 'block';
+                } else {
+                    fileDisplay.style.display = 'none';
+                }
+            });
+
+            document.getElementById('checkinForm').addEventListener('submit', async function(e) {
                 e.preventDefault();
-                const submitBtn = document.getElementById("submitBtn");
-                const messageDiv = document.getElementById("message");
+                const submitBtn = document.getElementById('submitBtn');
+                const messageDiv = document.getElementById('message');
                 submitBtn.disabled = true;
+                submitBtn.innerText = 'Processing Selfie...';
                 const formData = new FormData(this);
                 try {
-                    const response = await fetch("/api/patron/checkin", { method: "POST", body: formData });
+                    const response = await fetch('/api/patron/checkin', { method: 'POST', body: formData });
                     const result = await response.json();
                     if (response.ok && result.success) {
-                        messageDiv.className = "success";
-                        messageDiv.innerHTML = "🎉 Check-in logged successfully with face encoding!";
-                        messageDiv.style.display = "block";
+                        messageDiv.className = 'success';
+                        messageDiv.innerHTML = '🎉 Check-in logged successfully with face encoding!';
+                        messageDiv.style.display = 'block';
                         this.reset();
-                    } else { throw new Error(result.error || "Server error"); }
+                        document.getElementById('fileSelectedDisplay').style.display = 'none';
+                    } else { throw new Error(result.error || 'Server error'); }
                 } catch (err) {
-                    messageDiv.className = "error";
-                    messageDiv.innerHTML = "❌ Error: " + err.message;
-                    messageDiv.style.display = "block";
-                } finally { submitBtn.disabled = false; }
+                    messageDiv.className = 'error';
+                    messageDiv.innerHTML = '❌ Error: ' + err.message;
+                    messageDiv.style.display = 'block';
+                } finally { 
+                    submitBtn.disabled = false; 
+                    submitBtn.innerText = 'Complete Check-In';
+                }
             });
         </script>
     </body>
     </html>
-    """
+    '''
 
-@app.route("/dashboard")
+@app.route('/dashboard')
 def dashboard():
-    if "credentials" not in session:
-        return "<h3>401 Unauthorized: Please log in first.</h3><a href="/api/auth/login">Login</a>", 401
+    if 'credentials' not in session:
+        return "<h3>401 Unauthorized: Please log in first.</h3><a href='/api/auth/login'>Login</a>", 401
         
-    email = session.get("user_email", "Admin")
+    email = session.get('user_email', 'Admin')
+    drive_id = get_user_drive_folder_id()
+    sheet_id = get_user_spreadsheet_id()
     
-    html = """
+    html = '''
     <!DOCTYPE html>
     <html>
     <head>
@@ -194,6 +401,11 @@ def dashboard():
             
             .search-input { width: 100%; padding: 10px 16px; border: 1px solid #d1d5db; border-radius: 8px; font-size: 14px; box-sizing: border-box; margin-bottom: 12px; }
             
+            .config-section { display: flex; flex-direction: column; gap: 12px; background: #f8fafc; padding: 16px; border-radius: 8px; border: 1px solid #e2e8f0; margin-bottom: 10px; }
+            .config-field-group { display: flex; align-items: center; gap: 10px; }
+            .config-label { width: 160px; font-size: 13px; font-weight: 600; color: #334155; }
+            .config-field-group input { flex: 1; padding: 8px 12px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 13px; }
+
             .table-container { max-height: 340px; overflow-y: auto; border: 1px solid #f3f4f6; border-radius: 8px; }
             .data-table { width: 100%; border-collapse: collapse; text-align: left; }
             .data-table th { font-size: 11px; font-weight: 700; color: #6b7280; text-transform: uppercase; padding: 12px 16px; background: #f9fafb; position: sticky; top: 0; border-bottom: 1px solid #e5e7eb; }
@@ -204,6 +416,12 @@ def dashboard():
             
             .console-box { background: #0b1329; color: #e2e8f0; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; padding: 16px; border-radius: 10px; font-size: 13px; line-height: 1.6; max-height: 160px; overflow-y: auto; }
             .console-line { margin: 0; }
+
+            .modal-backdrop { position: fixed; top:0; left:0; width:100vw; height:100vh; background: rgba(0,0,0,0.5); display:none; justify-content:center; align-items:center; z-index:9999; }
+            .modal-box { background: white; padding: 24px; border-radius: 12px; width: 500px; max-width: 90%; max-height: 80vh; display: flex; flex-direction: column; gap: 12px; }
+            .modal-list { max-height: 300px; overflow-y: auto; border: 1px solid #e2e8f0; border-radius: 6px; }
+            .modal-item { padding: 10px 14px; border-bottom: 1px solid #f1f5f9; cursor: pointer; font-size: 14px; display: flex; justify-content: space-between; }
+            .modal-item:hover { background: #f8fafc; color: #2563eb; }
         </style>
     </head>
     <body>
@@ -220,8 +438,29 @@ def dashboard():
                 </div>
             </div>
 
+            <div class="card" style="padding: 16px 24px;">
+                <div style="font-size: 14px; font-weight: 700; margin-bottom: 12px; color: #1e293b;">Active User Resource Config</div>
+                <div class="config-section">
+                    <div class="config-field-group">
+                        <span class="config-label">Drive Folder:</span>
+                        <input type="text" id="driveFolderName" readonly placeholder="Drive Folder Name Loading..." style="background:#f1f5f9; flex: 1;">
+                        <input type="text" id="driveFolderInput" value="DRIVE_FOLDER_PLACEHOLDER" placeholder="Folder ID" style="width: 220px;">
+                        <button class="btn btn-light btn-sm" onclick="openPicker('folder')">Browse Drive</button>
+                    </div>
+                    <div class="config-field-group">
+                        <span class="config-label">Google Sheet:</span>
+                        <input type="text" id="spreadsheetName" readonly placeholder="Sheet Name Loading..." style="background:#f1f5f9; flex: 1;">
+                        <input type="text" id="spreadsheetInput" value="SPREADSHEET_PLACEHOLDER" placeholder="Sheet ID" style="width: 220px;">
+                        <button class="btn btn-light btn-sm" onclick="openPicker('sheet')">Browse Sheets</button>
+                    </div>
+                    <div style="text-align: right; margin-top: 4px;">
+                        <button class="btn btn-blue btn-sm" onclick="updateUserConfig()">Save Workspace IDs</button>
+                    </div>
+                </div>
+            </div>
+
             <div class="card">
-                <div class="card-title">Grid 1: Event Folders (Mapped Folder ID: 1FBhdmP9xzKnD8-aCx5aJIV3jcgoujWIm)</div>
+                <div class="card-title">Grid 1: Event Folders</div>
                 <input type="text" id="folderSearchInput" class="search-input" onkeyup="filterGrid1()" placeholder="Search event folders by name...">
                 <div class="table-container">
                     <table class="data-table">
@@ -269,43 +508,136 @@ def dashboard():
             </div>
         </div>
 
+        <div id="pickerModal" class="modal-backdrop">
+            <div class="modal-box">
+                <div style="display:flex; justify-content:space-between; align-items:center;">
+                    <h3 id="modalTitle" style="margin:0; font-size:16px;">Select Resource</h3>
+                    <button onclick="closePicker()" style="border:none; background:none; cursor:pointer; font-size:18px;">✕</button>
+                </div>
+                <div id="modalList" class="modal-list">
+                    <div style="padding:16px; text-align:center; color:#64748b;">Loading files...</div>
+                </div>
+            </div>
+        </div>
+
         <script>
             let grid1Folders = [];
             let currentSelectedFolder = null;
+            let currentPickerType = null;
+
+            async function openPicker(type) {
+                currentPickerType = type;
+                const modal = document.getElementById('pickerModal');
+                const title = document.getElementById('modalTitle');
+                const list = document.getElementById('modalList');
+                
+                title.innerText = type === 'folder' ? 'Select Drive Folder' : 'Select Google Sheet';
+                list.innerHTML = '<div style="padding:16px; text-align:center; color:#64748b;">Fetching Drive resources...</div>';
+                modal.style.display = 'flex';
+
+                try {
+                    const res = await fetch(`/api/admin/drive-resources?type=${type}`);
+                    const data = await res.json();
+                    if (data.error) throw new Error(data.error);
+
+                    if (data.items.length === 0) {
+                        list.innerHTML = `<div style="padding:16px; text-align:center; color:#64748b;">No ${type === 'folder' ? 'folders' : 'sheets'} found in your Drive.</div>`;
+                        return;
+                    }
+
+                    list.innerHTML = data.items.map(item => `
+                        <div class="modal-item" onclick="selectPickerItem('${item.id}', '${escapeHtml(item.name)}')">
+                            <span><strong>${escapeHtml(item.name)}</strong></span>
+                            <span style="font-size:11px; color:#94a3b8; font-family:monospace;">${item.id}</span>
+                        </div>
+                    `).join('');
+                } catch (err) {
+                    list.innerHTML = `<div style="padding:16px; text-align:center; color:#ef4444;">Error: ${err.message}</div>`;
+                }
+            }
+
+            function selectPickerItem(id, name) {
+                if (currentPickerType === 'folder') {
+                    document.getElementById('driveFolderInput').value = id;
+                    document.getElementById('driveFolderName').value = name;
+                } else {
+                    document.getElementById('spreadsheetInput').value = id;
+                    document.getElementById('spreadsheetName').value = name;
+                }
+                closePicker();
+                updateUserConfig();
+            }
+
+            function closePicker() {
+                document.getElementById('pickerModal').style.display = 'none';
+            }
+
+            async function updateUserConfig() {
+                const driveFolderId = document.getElementById('driveFolderInput').value.trim();
+                const spreadsheetId = document.getElementById('spreadsheetInput').value.trim();
+                
+                logConsole('Updating and initializing workspace config...');
+                try {
+                    const res = await fetch('/api/admin/config', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ drive_folder_id: driveFolderId, spreadsheet_id: spreadsheetId })
+                    });
+                    const data = await res.json();
+                    if (data.error) throw new Error(data.error);
+                    
+                    if(data.drive_folder_name) document.getElementById('driveFolderName').value = data.drive_folder_name;
+                    if(data.spreadsheet_name) document.getElementById('spreadsheetName').value = data.spreadsheet_name;
+
+                    logConsole('Workspace saved! Automatically verified and created Sheet1 & matchedfaces sub-sheets.');
+                    loadGrid1Folders();
+                } catch (err) {
+                    logConsole('ERROR updating config: ' + err.message);
+                }
+            }
+
+            async function fetchResourceNames() {
+                try {
+                    const res = await fetch('/api/admin/resource-names');
+                    const data = await res.json();
+                    if(data.drive_folder_name) document.getElementById('driveFolderName').value = data.drive_folder_name;
+                    if(data.spreadsheet_name) document.getElementById('spreadsheetName').value = data.spreadsheet_name;
+                } catch(e){}
+            }
 
             async function loadGrid1Folders() {
-                logConsole("Fetching subfolders from mapped Drive folder...");
+                logConsole('Fetching subfolders from mapped Drive folder...');
                 try {
-                    const res = await fetch("/api/admin/folders");
+                    const res = await fetch('/api/admin/folders');
                     const data = await res.json();
                     if (data.error) throw new Error(data.error);
                     
                     grid1Folders = data.folders || [];
                     renderGrid1(grid1Folders);
-                    logConsole("Grid 1 updated: Found " + grid1Folders.length + " event folder(s).");
+                    logConsole('Grid 1 updated: Found ' + grid1Folders.length + ' event folder(s).');
                 } catch (err) {
-                    logConsole("ERROR loading Grid 1: " + err.message);
+                    logConsole('ERROR loading Grid 1: ' + err.message);
                 }
             }
 
             function renderGrid1(folders) {
-                const tbody = document.getElementById("grid1Body");
+                const tbody = document.getElementById('grid1Body');
                 if (folders.length === 0) {
-                    tbody.innerHTML = "<tr><td colspan="3">No subfolders found inside target Drive folder.</td></tr>";
+                    tbody.innerHTML = '<tr><td colspan="3">No subfolders found inside target Drive folder.</td></tr>';
                     return;
                 }
 
                 tbody.innerHTML = folders.map(f => `
-                    <tr class="clickable ${currentSelectedFolder && currentSelectedFolder.id === f.id ? "selected" : ""}" onclick="selectFolder("${f.id}", "${escapeHtml(f.name)}", ${f.photoCount}, ${f.patronCount})">
+                    <tr class="clickable ${currentSelectedFolder && currentSelectedFolder.id === f.id ? 'selected' : ''}" onclick="selectFolder('${f.id}', '${escapeHtml(f.name)}', ${f.photoCount}, ${f.patronCount})">
                         <td><strong>${escapeHtml(f.name)}</strong></td>
                         <td>${f.photoCount} photo(s)</td>
                         <td>${f.patronCount} patron(s)</td>
                     </tr>
-                `).join("");
+                `).join('');
             }
 
             function filterGrid1() {
-                const query = document.getElementById("folderSearchInput").value.toLowerCase();
+                const query = document.getElementById('folderSearchInput').value.toLowerCase();
                 const filtered = grid1Folders.filter(f => f.name.toLowerCase().includes(query));
                 renderGrid1(filtered);
             }
@@ -314,16 +646,16 @@ def dashboard():
                 currentSelectedFolder = { id: folderId, name: folderName, photoCount, patronCount };
                 
                 renderGrid1(grid1Folders);
-                document.getElementById("selectedFolderTitle").innerText = "— " + folderName;
-                document.getElementById("btnProcessImage").disabled = false;
+                document.getElementById('selectedFolderTitle').innerText = '— ' + folderName;
+                document.getElementById('btnProcessImage').disabled = false;
                 
                 logConsole(`Selected event folder "${folderName}". Loading matched patrons...`);
                 await loadGrid2Patrons(folderId);
             }
 
             async function loadGrid2Patrons(folderId) {
-                const tbody = document.getElementById("grid2Body");
-                tbody.innerHTML = "<tr><td colspan="5">Loading matched patrons...</td></tr>";
+                const tbody = document.getElementById('grid2Body');
+                tbody.innerHTML = '<tr><td colspan="5">Loading matched patrons...</td></tr>';
                 
                 try {
                     const res = await fetch(`/api/admin/matched-patrons?folder_id=${folderId}`);
@@ -332,10 +664,10 @@ def dashboard():
                     
                     const patrons = data.patrons || [];
                     
-                    document.getElementById("btnShareAll").disabled = (patrons.length === 0);
+                    document.getElementById('btnShareAll').disabled = (patrons.length === 0);
 
                     if (patrons.length === 0) {
-                        tbody.innerHTML = "<tr><td colspan="5" style="color: #6b7280;">No patrons matched for this folder yet. Click "Process Image" to run facial recognition.</td></tr>";
+                        tbody.innerHTML = '<tr><td colspan="5" style="color: #6b7280;">No patrons matched for this folder yet. Click "Process Image" to run facial recognition.</td></tr>';
                         return;
                     }
 
@@ -346,26 +678,26 @@ def dashboard():
                             <td>${escapeHtml(p.phone)}</td>
                             <td>${p.photoCount} photo(s)</td>
                             <td style="text-align: right;">
-                                <button class="btn btn-light btn-sm" onclick="shareSinglePatron("${p.email}", "${escapeHtml(p.name)}")">Share</button>
+                                <button class="btn btn-light btn-sm" onclick="shareSinglePatron('${p.email}', '${escapeHtml(p.name)}')">Share</button>
                             </td>
                         </tr>
-                    `).join("");
+                    `).join('');
                     
                     logConsole(`Grid 2 populated: Found ${patrons.length} matched patron(s).`);
                 } catch (err) {
-                    logConsole("ERROR loading Grid 2: " + err.message);
+                    logConsole('ERROR loading Grid 2: ' + err.message);
                 }
             }
 
             async function processImage() {
                 if (!currentSelectedFolder) return;
                 logConsole(`Running facial recognition for folder "${currentSelectedFolder.name}"...`);
-                document.getElementById("btnProcessImage").disabled = true;
+                document.getElementById('btnProcessImage').disabled = true;
 
                 try {
-                    const res = await fetch("/api/admin/process-folder", {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
+                    const res = await fetch('/api/admin/process-folder', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ folder_id: currentSelectedFolder.id, folder_name: currentSelectedFolder.name })
                     });
                     const data = await res.json();
@@ -375,18 +707,18 @@ def dashboard():
                     await loadGrid1Folders();
                     await loadGrid2Patrons(currentSelectedFolder.id);
                 } catch (err) {
-                    logConsole("ERROR during facial recognition processing: " + err.message);
+                    logConsole('ERROR during facial recognition processing: ' + err.message);
                 } finally {
-                    document.getElementById("btnProcessImage").disabled = false;
+                    document.getElementById('btnProcessImage').disabled = false;
                 }
             }
 
             async function shareSinglePatron(email, name) {
                 logConsole(`Sending matched photo bundle email to ${name} (${email})...`);
                 try {
-                    const res = await fetch("/api/admin/share-single", {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
+                    const res = await fetch('/api/admin/share-single', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ folder_id: currentSelectedFolder.id, email: email })
                     });
                     const data = await res.json();
@@ -400,12 +732,12 @@ def dashboard():
             async function shareToAllMatched() {
                 if (!currentSelectedFolder) return;
                 logConsole(`Dispatching photo emails to all unsent matched patrons for "${currentSelectedFolder.name}"...`);
-                document.getElementById("btnShareAll").disabled = true;
+                document.getElementById('btnShareAll').disabled = true;
 
                 try {
-                    const res = await fetch("/api/admin/share-all", {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
+                    const res = await fetch('/api/admin/share-all', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ folder_id: currentSelectedFolder.id })
                     });
                     const data = await res.json();
@@ -413,38 +745,120 @@ def dashboard():
 
                     logConsole(`Bulk email complete: Sent ${data.sent_count} email package(s).`);
                 } catch (err) {
-                    logConsole("ERROR in bulk share: " + err.message);
+                    logConsole('ERROR in bulk share: ' + err.message);
                 } finally {
-                    document.getElementById("btnShareAll").disabled = false;
+                    document.getElementById('btnShareAll').disabled = false;
                 }
             }
 
             function logConsole(msg) {
-                const box = document.getElementById("consoleOutput");
+                const box = document.getElementById('consoleOutput');
                 const time = new Date().toLocaleTimeString();
                 box.innerHTML = `<p class="console-line">[${time}] ${escapeHtml(msg)}</p>` + box.innerHTML;
             }
 
             function escapeHtml(str) {
-                return (str || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+                return (str || '').replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
             }
 
+            fetchResourceNames();
             loadGrid1Folders();
         </script>
     </body>
     </html>
-    """
-    return html.replace("USER_EMAIL_PLACEHOLDER", email)
+    '''
+    return html.replace('USER_EMAIL_PLACEHOLDER', email).replace('DRIVE_FOLDER_PLACEHOLDER', drive_id).replace('SPREADSHEET_PLACEHOLDER', sheet_id)
 
-@app.route("/api/auth/login")
+@app.route('/api/admin/drive-resources')
+def api_drive_resources():
+    if 'credentials' not in session:
+        return jsonify({"error": "Unauthorized"}), 401
+    
+    res_type = request.args.get('type', 'folder')
+    try:
+        drive_srv, _, _ = get_google_services(session['credentials'])
+        
+        if res_type == 'folder':
+            q = "mimeType = 'application/vnd.google-apps.folder' and trashed = false"
+        else:
+            q = "mimeType = 'application/vnd.google-apps.spreadsheet' and trashed = false"
+
+        res = drive_srv.files().list(q=q, fields="files(id, name)", pageSize=50, orderBy="modifiedTime desc").execute()
+        return jsonify({"items": res.get('files', [])})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/admin/resource-names')
+def api_resource_names():
+    if 'credentials' not in session:
+        return jsonify({"error": "Unauthorized"}), 401
+    try:
+        drive_srv, _, _ = get_google_services(session['credentials'])
+        
+        folder_name, sheet_name = "N/A", "N/A"
+        
+        drive_id = get_user_drive_folder_id()
+        sheet_id = get_user_spreadsheet_id()
+        
+        if drive_id:
+            try:
+                f_meta = drive_srv.files().get(fileId=drive_id, fields="name").execute()
+                folder_name = f_meta.get('name', 'Drive Folder')
+            except Exception: pass
+            
+        if sheet_id:
+            try:
+                s_meta = drive_srv.files().get(fileId=sheet_id, fields="name").execute()
+                sheet_name = s_meta.get('name', 'Google Sheet')
+            except Exception: pass
+
+        return jsonify({"drive_folder_name": folder_name, "spreadsheet_name": sheet_name})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/admin/config', methods=['POST'])
+def api_update_config():
+    if 'credentials' not in session:
+        return jsonify({"error": "Unauthorized"}), 401
+    
+    data = request.get_json() or {}
+    drive_folder_id = data.get('drive_folder_id')
+    spreadsheet_id = data.get('spreadsheet_id')
+
+    if drive_folder_id:
+        session['drive_folder_id'] = drive_folder_id
+    if spreadsheet_id:
+        session['spreadsheet_id'] = spreadsheet_id
+
+    save_workspace_config(get_user_spreadsheet_id(), get_user_drive_folder_id())
+
+    drive_srv, sheets_srv, _ = get_google_services(session['credentials'])
+    
+    if spreadsheet_id:
+        try:
+            init_user_spreadsheet(sheets_srv, spreadsheet_id)
+        except Exception as err:
+            return jsonify({"error": f"Failed to initialize sub-sheets in target Google Sheet: {str(err)}"}), 400
+
+    folder_name, sheet_name = "N/A", "N/A"
+    try:
+        if session.get('drive_folder_id'):
+            folder_name = drive_srv.files().get(fileId=session['drive_folder_id'], fields="name").execute().get('name', 'Folder')
+        if session.get('spreadsheet_id'):
+            sheet_name = drive_srv.files().get(fileId=session['spreadsheet_id'], fields="name").execute().get('name', 'Sheet')
+    except Exception: pass
+
+    return jsonify({"success": True, "drive_folder_name": folder_name, "spreadsheet_name": sheet_name})
+
+@app.route('/api/auth/login')
 def login():
     client_config, client_file = get_client_config()
     scopes = [
-        "https://www.googleapis.com/auth/drive", 
-        "https://www.googleapis.com/auth/spreadsheets", 
-        "https://www.googleapis.com/auth/gmail.send",
-        "https://www.googleapis.com/auth/userinfo.email",
-        "openid"
+        'https://www.googleapis.com/auth/drive', 
+        'https://www.googleapis.com/auth/spreadsheets', 
+        'https://www.googleapis.com/auth/gmail.send',
+        'https://www.googleapis.com/auth/userinfo.email',
+        'openid'
     ]
     if client_file:
         flow = Flow.from_client_secrets_file(client_file, scopes=scopes)
@@ -453,31 +867,30 @@ def login():
 
     flow.redirect_uri = "https://photoshare-app-632737028539.us-central1.run.app/oauth2callback"
     authorization_url, state = flow.authorization_url(
-        access_type="offline", 
-        include_granted_scopes="true",
-        prompt="consent"
+        access_type='offline', 
+        include_granted_scopes='true',
+        prompt='consent'
     )
-    session["state"] = state
-    if hasattr(flow, "code_verifier") and flow.code_verifier:
-        session["code_verifier"] = flow.code_verifier
+    session['state'] = state
+    if hasattr(flow, 'code_verifier') and flow.code_verifier:
+        session['code_verifier'] = flow.code_verifier
 
     return redirect(authorization_url)
 
-@app.route("/oauth2callback")
+@app.route('/oauth2callback')
 def oauth2callback():
-    global system_creds_cache
     try:
-        state = session.get("state", None)
+        state = session.get('state', None)
         if not state:
             return "<h3>Error: Session state lost during redirect.</h3>", 400
 
         client_config, client_file = get_client_config()
         scopes = [
-            "https://www.googleapis.com/auth/drive", 
-            "https://www.googleapis.com/auth/spreadsheets", 
-            "https://www.googleapis.com/auth/gmail.send",
-            "https://www.googleapis.com/auth/userinfo.email",
-            "openid"
+            'https://www.googleapis.com/auth/drive', 
+            'https://www.googleapis.com/auth/spreadsheets', 
+            'https://www.googleapis.com/auth/gmail.send',
+            'https://www.googleapis.com/auth/userinfo.email',
+            'openid'
         ]
         if client_file:
             flow = Flow.from_client_secrets_file(client_file, state=state, scopes=scopes)
@@ -485,53 +898,59 @@ def oauth2callback():
             flow = Flow.from_client_config(client_config, state=state, scopes=scopes)
 
         flow.redirect_uri = "https://photoshare-app-632737028539.us-central1.run.app/oauth2callback"
-        if "code_verifier" in session:
-            flow.code_verifier = session["code_verifier"]
+        if 'code_verifier' in session:
+            flow.code_verifier = session['code_verifier']
         
         authorization_response = request.url
-        if authorization_response.startswith("http://"):
-            authorization_response = authorization_response.replace("http://", "https://", 1)
+        if authorization_response.startswith('http://'):
+            authorization_response = authorization_response.replace('http://', 'https://', 1)
             
         flow.fetch_token(authorization_response=authorization_response)
         creds = flow.credentials
 
-        user_info_service = build("oauth2", "v2", credentials=creds)
+        user_info_service = build('oauth2', 'v2', credentials=creds)
         user_info = user_info_service.userinfo().get().execute()
-        email = user_info.get("email")
+        email = user_info.get('email')
 
-        if email not in ALLOWED_USERS:
-            return f"403 Forbidden: Identity Unauthorized ({email})", 403
+        if email:
+            ALLOWED_USERS.add(email)
 
         creds_dict = {
-            "token": creds.token,
-            "refresh_token": creds.refresh_token,
-            "token_uri": creds.token_uri,
-            "client_id": creds.client_id,
-            "client_secret": creds.client_secret,
-            "scopes": creds.scopes
+            'token': creds.token,
+            'refresh_token': creds.refresh_token,
+            'token_uri': creds.token_uri,
+            'client_id': creds.client_id,
+            'client_secret': creds.client_secret,
+            'scopes': creds.scopes
         }
         
-        session["credentials"] = creds_dict
-        session["user_email"] = email
-        system_creds_cache = creds_dict
-        
-        return redirect("/dashboard")
+        session['credentials'] = creds_dict
+        session['user_email'] = email
+        save_creds_to_disk(creds_dict)
+
+        if session.get('spreadsheet_id'):
+            try:
+                _, sheets_srv, _ = get_google_services(creds_dict)
+                init_user_spreadsheet(sheets_srv, session['spreadsheet_id'])
+            except Exception as e:
+                print(f"Spreadsheet init on login notice: {e}")
+
+        return redirect('/dashboard')
 
     except Exception as e:
         return f"<h1>Internal Error:</h1><pre>{traceback.format_exc()}</pre>", 500
 
-@app.route("/logout")
+@app.route('/logout')
 def logout():
     session.clear()
-    return redirect("/")
+    return redirect('/')
 
-@app.route("/api/patron/checkin", methods=["POST"])
+@app.route('/api/patron/checkin', methods=['POST'])
 def patron_checkin():
-    global system_creds_cache
-    name = request.form.get("name")
-    email = request.form.get("email")
-    phone = request.form.get("phone")
-    selfie_file = request.files.get("selfie")
+    name = request.form.get('name')
+    email = request.form.get('email')
+    phone = request.form.get('phone')
+    selfie_file = request.files.get('selfie')
 
     if not name or not email or not phone or not selfie_file:
         return jsonify({"error": "Missing mandatory fields"}), 400
@@ -543,17 +962,20 @@ def patron_checkin():
 
     embedding_json = json.dumps(encodings[0].tolist())
 
-    creds_to_use = session.get("credentials") or system_creds_cache
+    creds_to_use = session.get('credentials') or load_creds()
     if not creds_to_use:
         return jsonify({"error": "Server not authenticated with Google Sheets yet. Admin must log in once at /api/auth/login to authorize guest check-ins."}), 503
 
     try:
         _, sheets_srv, _ = get_google_services(creds_to_use)
+        target_sheet_id = get_user_spreadsheet_id()
         
+        init_user_spreadsheet(sheets_srv, target_sheet_id)
+
         new_row = [[name, email, phone, datetime.utcnow().isoformat(), embedding_json]]
         
         sheets_srv.spreadsheets().values().append(
-            spreadsheetId=SPREADSHEET_ID,
+            spreadsheetId=target_sheet_id,
             range="Sheet1!A:E",
             valueInputOption="USER_ENTERED",
             body={"values": new_row}
@@ -563,20 +985,21 @@ def patron_checkin():
     except Exception as e:
         return jsonify({"error": f"Failed to append to Google Sheets: {str(e)}"}), 500
 
-@app.route("/api/admin/folders")
+@app.route('/api/admin/folders')
 def api_get_folders():
-    if "credentials" not in session:
+    if 'credentials' not in session:
         return jsonify({"error": "Unauthorized"}), 401
     
     try:
-        drive_srv, sheets_srv, _ = get_google_services(session["credentials"])
+        drive_srv, sheets_srv, _ = get_google_services(session['credentials'])
+        target_folder_id = get_user_drive_folder_id()
         
         try:
-            root_folder = drive_srv.files().get(fileId=TARGET_DRIVE_FOLDER_ID, fields="id, name").execute()
+            root_folder = drive_srv.files().get(fileId=target_folder_id, fields="id, name").execute()
         except Exception as err:
-            return jsonify({"error": f"Unable to access Drive Folder ID ({TARGET_DRIVE_FOLDER_ID}). Details: {str(err)}"}), 400
+            return jsonify({"error": f"Unable to access Drive Folder ID ({target_folder_id}). Details: {str(err)}"}), 400
 
-        photoz_id = root_folder["id"]
+        photoz_id = root_folder['id']
         
         sub_query = f"'{photoz_id}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
         sub_res = drive_srv.files().list(
@@ -584,21 +1007,21 @@ def api_get_folders():
             fields="files(id, name, createdTime)", 
             orderBy="createdTime desc"
         ).execute()
-        event_folders = sub_res.get("files", [])
+        event_folders = sub_res.get('files', [])
         
         results = []
         for f in event_folders:
-            folder_id = f["id"]
-            folder_name = f["name"]
+            folder_id = f['id']
+            folder_name = f['name']
             
             file_query = f"'{folder_id}' in parents and mimeType contains 'image/' and trashed = false"
             file_res = drive_srv.files().list(q=file_query, fields="files(id)").execute()
-            photo_count = len(file_res.get("files", []))
+            photo_count = len(file_res.get('files', []))
             
             patron_count = 0
             try:
-                sheet_data = sheets_srv.spreadsheets().values().get(spreadsheetId=SPREADSHEET_ID, range="matchedfaces!A2:G").execute()
-                rows = sheet_data.get("values", [])
+                sheet_data = sheets_srv.spreadsheets().values().get(spreadsheetId=get_user_spreadsheet_id(), range="matchedfaces!A2:G").execute()
+                rows = sheet_data.get('values', [])
                 matched_patrons = set(r[2] for r in rows if len(r) >= 3 and r[0] == folder_id)
                 patron_count = len(matched_patrons)
             except Exception:
@@ -615,25 +1038,25 @@ def api_get_folders():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-@app.route("/api/admin/matched-patrons")
+@app.route('/api/admin/matched-patrons')
 def api_matched_patrons():
-    if "credentials" not in session:
+    if 'credentials' not in session:
         return jsonify({"error": "Unauthorized"}), 401
         
-    folder_id = request.args.get("folder_id")
+    folder_id = request.args.get('folder_id')
     if not folder_id:
         return jsonify({"error": "Missing folder_id"}), 400
 
     try:
-        _, sheets_srv, _ = get_google_services(session["credentials"])
+        _, sheets_srv, _ = get_google_services(session['credentials'])
         
         matched_data = []
         try:
             matched_res = sheets_srv.spreadsheets().values().get(
-                spreadsheetId=SPREADSHEET_ID, 
+                spreadsheetId=get_user_spreadsheet_id(), 
                 range="matchedfaces!A2:G"
             ).execute()
-            matched_data = matched_res.get("values", [])
+            matched_data = matched_res.get('values', [])
         except Exception:
             matched_data = []
 
@@ -651,32 +1074,32 @@ def api_matched_patrons():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-@app.route("/api/admin/process-folder", methods=["POST"])
+@app.route('/api/admin/process-folder', methods=['POST'])
 def api_process_folder():
-    if "credentials" not in session:
+    if 'credentials' not in session:
         return jsonify({"error": "Unauthorized"}), 401
         
     data = request.get_json() or {}
-    folder_id = data.get("folder_id")
+    folder_id = data.get('folder_id')
     if not folder_id:
         return jsonify({"error": "Missing folder_id"}), 400
 
     try:
-        drive_srv, sheets_srv, _ = get_google_services(session["credentials"])
+        drive_srv, sheets_srv, _ = get_google_services(session['credentials'])
         
         files_res = drive_srv.files().list(
             q=f"'{folder_id}' in parents and mimeType contains 'image/' and trashed = false", 
             fields="files(id, name, webViewLink)"
         ).execute()
-        image_files = files_res.get("files", [])
+        image_files = files_res.get('files', [])
         
         if not image_files:
             return jsonify({"success": True, "processed_count": 0, "message": "No images found."})
 
         patron_data = []
         try:
-            p_res = sheets_srv.spreadsheets().values().get(spreadsheetId=SPREADSHEET_ID, range="Sheet1!A2:E").execute()
-            patron_data = p_res.get("values", [])
+            p_res = sheets_srv.spreadsheets().values().get(spreadsheetId=get_user_spreadsheet_id(), range="Sheet1!A2:E").execute()
+            patron_data = p_res.get('values', [])
         except Exception:
             patron_data = []
 
@@ -703,16 +1126,22 @@ def api_process_folder():
 
         for img in image_files:
             try:
-                img_content = drive_srv.files().get_media(fileId=img["id"]).execute()
+                img_content = drive_srv.files().get_media(fileId=img['id']).execute()
                 img_encodings = extract_face_embeddings(img_content)
-                img_link = img.get("webViewLink", f"https://drive.google.com/file/d/{img['id']}/view")
+                img_link = img.get('webViewLink', f"https://drive.google.com/file/d/{img['id']}/view")
 
+                is_matched = False
                 for face_enc in img_encodings:
                     for patron in known_patrons:
-                        distance = face_recognition.face_distance([patron["encoding"]], face_enc)[0]
+                        distance = face_recognition.face_distance([patron['encoding']], face_enc)[0]
                         if distance <= 0.6:
-                            if img_link not in patron["matched_links"]:
-                                patron["matched_links"].append(img_link)
+                            if img_link not in patron['matched_links']:
+                                patron['matched_links'].append(img_link)
+                                is_matched = True
+
+                if is_matched:
+                    make_file_public(drive_srv, img['id'])
+
             except Exception as file_err:
                 print(f"Error processing image {img['id']}: {file_err}")
                 continue
@@ -721,15 +1150,15 @@ def api_process_folder():
         new_matched_rows = []
 
         for patron in known_patrons:
-            if patron["matched_links"]:
-                links_str = "\n".join(patron["matched_links"])
-                match_count = len(patron["matched_links"])
+            if patron['matched_links']:
+                links_str = "\n".join(patron['matched_links'])
+                match_count = len(patron['matched_links'])
 
                 new_matched_rows.append([
                     folder_id,
-                    patron["name"],
-                    patron["email"],
-                    patron["phone"],
+                    patron['name'],
+                    patron['email'],
+                    patron['phone'],
                     match_count,
                     links_str,
                     timestamp_now
@@ -737,7 +1166,7 @@ def api_process_folder():
 
         if new_matched_rows:
             sheets_srv.spreadsheets().values().append(
-                spreadsheetId=SPREADSHEET_ID,
+                spreadsheetId=get_user_spreadsheet_id(),
                 range="matchedfaces!A:G",
                 valueInputOption="USER_ENTERED",
                 body={"values": new_matched_rows}
@@ -747,18 +1176,85 @@ def api_process_folder():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-@app.route("/api/admin/share-single", methods=["POST"])
+@app.route('/api/admin/share-single', methods=['POST'])
 def api_share_single():
-    if "credentials" not in session:
+    if 'credentials' not in session:
         return jsonify({"error": "Unauthorized"}), 401
-    return jsonify({"success": True, "status": "Email queued"})
+    
+    data = request.get_json() or {}
+    folder_id = data.get('folder_id')
+    target_email = data.get('email')
 
-@app.route("/api/admin/share-all", methods=["POST"])
+    if not folder_id or not target_email:
+        return jsonify({"error": "Missing folder_id or email"}), 400
+
+    try:
+        drive_srv, sheets_srv, gmail_srv = get_google_services(session['credentials'])
+        
+        res = sheets_srv.spreadsheets().values().get(spreadsheetId=get_user_spreadsheet_id(), range="matchedfaces!A2:G").execute()
+        rows = res.get('values', [])
+
+        target_row = None
+        for r in rows:
+            if len(r) >= 6 and r[0] == folder_id and r[2] == target_email:
+                target_row = r
+                break
+
+        if not target_row:
+            return jsonify({"error": f"No matched photos found in sheet for {target_email} in folder {folder_id}."}), 404
+
+        name = target_row[1]
+        links = target_row[5].split("\n")
+
+        for link in links:
+            if "/file/d/" in link:
+                file_id = link.split("/file/d/")[1].split("/")[0]
+                make_file_public(drive_srv, file_id)
+
+        send_photo_email(gmail_srv, target_email, name, links)
+        return jsonify({"success": True, "status": f"Email successfully dispatched to {target_email}"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/admin/share-all', methods=['POST'])
 def api_share_all():
-    if "credentials" not in session:
+    if 'credentials' not in session:
         return jsonify({"error": "Unauthorized"}), 401
-    return jsonify({"success": True, "sent_count": 1})
 
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host="0.0.0.0", port=port)
+    data = request.get_json() or {}
+    folder_id = data.get('folder_id')
+
+    if not folder_id:
+        return jsonify({"error": "Missing folder_id"}), 400
+
+    try:
+        drive_srv, sheets_srv, gmail_srv = get_google_services(session['credentials'])
+        
+        res = sheets_srv.spreadsheets().values().get(spreadsheetId=get_user_spreadsheet_id(), range="matchedfaces!A2:G").execute()
+        rows = res.get('values', [])
+
+        sent_count = 0
+        for r in rows:
+            if len(r) >= 6 and r[0] == folder_id:
+                name = r[1]
+                email = r[2]
+                links = r[5].split("\n")
+                
+                for link in links:
+                    if "/file/d/" in link:
+                        file_id = link.split("/file/d/")[1].split("/")[0]
+                        make_file_public(drive_srv, file_id)
+
+                try:
+                    send_photo_email(gmail_srv, email, name, links)
+                    sent_count += 1
+                except Exception as mail_err:
+                    print(f"Failed to email {email}: {mail_err}")
+
+        return jsonify({"success": True, "sent_count": sent_count})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 8080))
+    app.run(host='0.0.0.0', port=port)
