@@ -15,12 +15,13 @@ from googleapiclient.discovery import build
 import face_recognition
 from PIL import Image, ImageOps
 
-VERSION = "v4-camera-ui"
+VERSION = "v5-lock-unlock-config"
 
 ALLOWED_USERS = {"pranavcoolstar@gmail.com", "makwanapranav26@gmail.com"}
 
 TOKEN_FILE = "/tmp/google_tokens.json"
 WORKSPACE_FILE = "/tmp/active_workspace.json"
+USER_CONFIGS_FILE = "/tmp/user_configs.json"
 
 DEFAULT_SPREADSHEET_ID = "1gWWBNpKU1lIEz7RCiCycIqvg_QJKARqPJHbpIr78RvE"
 DEFAULT_DRIVE_FOLDER_ID = "1FBhdmP9xzKnD8-aCx5aJIV3jcgoujWIm"
@@ -34,6 +35,38 @@ app.config.update(
 )
 
 system_creds_cache = None
+
+def load_all_user_configs():
+    if os.path.exists(USER_CONFIGS_FILE):
+        try:
+            with open(USER_CONFIGS_FILE, 'r') as f:
+                return json.load(f)
+        except Exception: pass
+    return {}
+
+def save_user_config(email, sheet_id, folder_id, is_locked=False):
+    configs = load_all_user_configs()
+    configs[email] = {
+        "spreadsheet_id": sheet_id,
+        "drive_folder_id": folder_id,
+        "is_locked": is_locked
+    }
+    try:
+        with open(USER_CONFIGS_FILE, 'w') as f:
+            json.dump(configs, f)
+    except Exception as e:
+        print(f"Failed to save user configs: {e}")
+
+def get_current_user_config():
+    email = session.get('user_email', 'default')
+    configs = load_all_user_configs()
+    if email in configs:
+        return configs[email]
+    return {
+        "spreadsheet_id": session.get('spreadsheet_id', DEFAULT_SPREADSHEET_ID),
+        "drive_folder_id": session.get('drive_folder_id', DEFAULT_DRIVE_FOLDER_ID),
+        "is_locked": False
+    }
 
 def save_workspace_config(sheet_id, folder_id):
     try:
@@ -51,10 +84,12 @@ def load_workspace_config():
     return {"spreadsheet_id": DEFAULT_SPREADSHEET_ID, "drive_folder_id": DEFAULT_DRIVE_FOLDER_ID}
 
 def get_user_spreadsheet_id():
-    return session.get('spreadsheet_id') or load_workspace_config().get('spreadsheet_id', DEFAULT_SPREADSHEET_ID)
+    cfg = get_current_user_config()
+    return cfg.get('spreadsheet_id') or session.get('spreadsheet_id') or load_workspace_config().get('spreadsheet_id', DEFAULT_SPREADSHEET_ID)
 
 def get_user_drive_folder_id():
-    return session.get('drive_folder_id') or load_workspace_config().get('drive_folder_id', DEFAULT_DRIVE_FOLDER_ID)
+    cfg = get_current_user_config()
+    return cfg.get('drive_folder_id') or session.get('drive_folder_id') or load_workspace_config().get('drive_folder_id', DEFAULT_DRIVE_FOLDER_ID)
 
 def save_creds_to_disk(creds_dict):
     global system_creds_cache
@@ -286,9 +321,7 @@ def checkin_form():
                 text-align: center;
                 transition: all 0.2s ease;
             }
-            .btn-camera:hover {
-                background: #e2e8f0;
-            }
+            .btn-camera:hover { background: #e2e8f0; }
             .file-selected-text {
                 margin-top: 6px;
                 font-size: 13px;
@@ -370,8 +403,11 @@ def dashboard():
         return "<h3>401 Unauthorized: Please log in first.</h3><a href='/api/auth/login'>Login</a>", 401
         
     email = session.get('user_email', 'Admin')
-    drive_id = get_user_drive_folder_id()
-    sheet_id = get_user_spreadsheet_id()
+    user_cfg = get_current_user_config()
+    
+    drive_id = user_cfg.get('drive_folder_id') or get_user_drive_folder_id()
+    sheet_id = user_cfg.get('spreadsheet_id') or get_user_spreadsheet_id()
+    is_locked = user_cfg.get('is_locked', False)
     
     html = '''
     <!DOCTYPE html>
@@ -386,7 +422,7 @@ def dashboard():
             .top-bar-left { display: flex; gap: 12px; }
             .top-bar-right { display: flex; align-items: center; gap: 16px; }
             
-            .btn { padding: 10px 18px; border-radius: 8px; font-weight: 600; font-size: 14px; border: none; cursor: pointer; transition: all 0.15s ease; text-decoration: none; display: inline-flex; align-items: center; }
+            .btn { padding: 10px 18px; border-radius: 8px; font-weight: 600; font-size: 14px; border: none; cursor: pointer; transition: all 0.15s ease; text-decoration: none; display: inline-flex; align-items: center; gap: 6px; }
             .btn:disabled { opacity: 0.5; cursor: not-allowed; }
             .btn-blue { background: #3b82f6; color: white; }
             .btn-blue:hover:not(:disabled) { background: #2563eb; }
@@ -396,6 +432,11 @@ def dashboard():
             .btn-light:hover:not(:disabled) { background: #d1d5db; }
             .btn-sm { padding: 6px 12px; font-size: 13px; font-weight: 500; border-radius: 6px; }
             
+            .btn-lock { background: #ef4444; color: white; }
+            .btn-lock:hover:not(:disabled) { background: #dc2626; }
+            .btn-unlock { background: #f59e0b; color: white; }
+            .btn-unlock:hover:not(:disabled) { background: #d97706; }
+
             .card { background: white; padding: 20px 24px; border-radius: 12px; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }
             .card-title { font-size: 16px; font-weight: 700; color: #111827; margin: 0 0 16px 0; display: flex; justify-content: space-between; align-items: center; }
             
@@ -405,6 +446,7 @@ def dashboard():
             .config-field-group { display: flex; align-items: center; gap: 10px; }
             .config-label { width: 160px; font-size: 13px; font-weight: 600; color: #334155; }
             .config-field-group input { flex: 1; padding: 8px 12px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 13px; }
+            .config-field-group input:disabled { background: #f1f5f9; color: #64748b; cursor: not-allowed; }
 
             .table-container { max-height: 340px; overflow-y: auto; border: 1px solid #f3f4f6; border-radius: 8px; }
             .data-table { width: 100%; border-collapse: collapse; text-align: left; }
@@ -438,23 +480,28 @@ def dashboard():
                 </div>
             </div>
 
+            <!-- Workspace Config Section with Lock/Unlock -->
             <div class="card" style="padding: 16px 24px;">
-                <div style="font-size: 14px; font-weight: 700; margin-bottom: 12px; color: #1e293b;">Active User Resource Config</div>
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 12px;">
+                    <span style="font-size: 14px; font-weight: 700; color: #1e293b;">Active User Resource Config</span>
+                    <span id="lockBadge" style="font-size:12px; font-weight:600; padding:3px 8px; border-radius:12px;"></span>
+                </div>
                 <div class="config-section">
                     <div class="config-field-group">
                         <span class="config-label">Drive Folder:</span>
                         <input type="text" id="driveFolderName" readonly placeholder="Drive Folder Name Loading..." style="background:#f1f5f9; flex: 1;">
                         <input type="text" id="driveFolderInput" value="DRIVE_FOLDER_PLACEHOLDER" placeholder="Folder ID" style="width: 220px;">
-                        <button class="btn btn-light btn-sm" onclick="openPicker('folder')">Browse Drive</button>
+                        <button id="btnBrowseDrive" class="btn btn-light btn-sm" onclick="openPicker('folder')">Browse Drive</button>
                     </div>
                     <div class="config-field-group">
                         <span class="config-label">Google Sheet:</span>
                         <input type="text" id="spreadsheetName" readonly placeholder="Sheet Name Loading..." style="background:#f1f5f9; flex: 1;">
                         <input type="text" id="spreadsheetInput" value="SPREADSHEET_PLACEHOLDER" placeholder="Sheet ID" style="width: 220px;">
-                        <button class="btn btn-light btn-sm" onclick="openPicker('sheet')">Browse Sheets</button>
+                        <button id="btnBrowseSheets" class="btn btn-light btn-sm" onclick="openPicker('sheet')">Browse Sheets</button>
                     </div>
-                    <div style="text-align: right; margin-top: 4px;">
-                        <button class="btn btn-blue btn-sm" onclick="updateUserConfig()">Save Workspace IDs</button>
+                    <div style="display:flex; justify-content:flex-end; gap:8px; margin-top: 4px;">
+                        <button id="btnToggleLock" class="btn btn-sm" onclick="toggleLockState()"></button>
+                        <button id="btnSaveConfig" class="btn btn-blue btn-sm" onclick="updateUserConfig()">Save Workspace IDs</button>
                     </div>
                 </div>
             </div>
@@ -524,8 +571,61 @@ def dashboard():
             let grid1Folders = [];
             let currentSelectedFolder = null;
             let currentPickerType = null;
+            let isLockedState = IS_LOCKED_PLACEHOLDER;
+
+            function applyLockUIState(locked) {
+                isLockedState = locked;
+                const driveInput = document.getElementById('driveFolderInput');
+                const sheetInput = document.getElementById('spreadsheetInput');
+                const btnBrowseDrive = document.getElementById('btnBrowseDrive');
+                const btnBrowseSheets = document.getElementById('btnBrowseSheets');
+                const btnSave = document.getElementById('btnSaveConfig');
+                const btnToggleLock = document.getElementById('btnToggleLock');
+                const lockBadge = document.getElementById('lockBadge');
+
+                driveInput.disabled = locked;
+                sheetInput.disabled = locked;
+                btnBrowseDrive.disabled = locked;
+                btnBrowseSheets.disabled = locked;
+                btnSave.disabled = locked;
+
+                if (locked) {
+                    btnToggleLock.className = 'btn btn-unlock btn-sm';
+                    btnToggleLock.innerHTML = '🔓 Unlock IDs';
+                    lockBadge.style.background = '#fee2e2';
+                    lockBadge.style.color = '#991b1b';
+                    lockBadge.innerText = '🔒 LOCKED';
+                } else {
+                    btnToggleLock.className = 'btn btn-lock btn-sm';
+                    btnToggleLock.innerHTML = '🔒 Lock IDs';
+                    lockBadge.style.background = '#fef3c7';
+                    lockBadge.style.color = '#92400e';
+                    lockBadge.innerText = '🔓 UNLOCKED';
+                }
+            }
+
+            async function toggleLockState() {
+                const targetLock = !isLockedState;
+                logConsole(targetLock ? 'Locking Workspace IDs...' : 'Unlocking Workspace IDs...');
+                
+                try {
+                    const res = await fetch('/api/admin/lock-toggle', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ is_locked: targetLock })
+                    });
+                    const data = await res.json();
+                    if (data.error) throw new Error(data.error);
+
+                    applyLockUIState(data.is_locked);
+                    logConsole(data.is_locked ? 'Workspace IDs locked successfully! Configuration will remain unchanged across logins.' : 'Workspace unlocked. You can now edit/browse Drive & Sheet IDs.');
+                } catch (err) {
+                    logConsole('ERROR toggling lock state: ' + err.message);
+                }
+            }
 
             async function openPicker(type) {
+                if (isLockedState) return;
                 currentPickerType = type;
                 const modal = document.getElementById('pickerModal');
                 const title = document.getElementById('modalTitle');
@@ -573,6 +673,7 @@ def dashboard():
             }
 
             async function updateUserConfig() {
+                if (isLockedState) return;
                 const driveFolderId = document.getElementById('driveFolderInput').value.trim();
                 const spreadsheetId = document.getElementById('spreadsheetInput').value.trim();
                 
@@ -761,13 +862,33 @@ def dashboard():
                 return (str || '').replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
             }
 
+            applyLockUIState(isLockedState);
             fetchResourceNames();
             loadGrid1Folders();
         </script>
     </body>
     </html>
     '''
-    return html.replace('USER_EMAIL_PLACEHOLDER', email).replace('DRIVE_FOLDER_PLACEHOLDER', drive_id).replace('SPREADSHEET_PLACEHOLDER', sheet_id)
+    return html.replace('USER_EMAIL_PLACEHOLDER', email)\
+               .replace('DRIVE_FOLDER_PLACEHOLDER', drive_id)\
+               .replace('SPREADSHEET_PLACEHOLDER', sheet_id)\
+               .replace('IS_LOCKED_PLACEHOLDER', 'true' if is_locked else 'false')
+
+@app.route('/api/admin/lock-toggle', methods=['POST'])
+def api_lock_toggle():
+    if 'credentials' not in session:
+        return jsonify({"error": "Unauthorized"}), 401
+    
+    data = request.get_json() or {}
+    is_locked = bool(data.get('is_locked', False))
+    email = session.get('user_email', 'default')
+
+    sheet_id = get_user_spreadsheet_id()
+    folder_id = get_user_drive_folder_id()
+
+    save_user_config(email, sheet_id, folder_id, is_locked)
+    
+    return jsonify({"success": True, "is_locked": is_locked})
 
 @app.route('/api/admin/drive-resources')
 def api_drive_resources():
@@ -821,16 +942,23 @@ def api_update_config():
     if 'credentials' not in session:
         return jsonify({"error": "Unauthorized"}), 401
     
+    email = session.get('user_email', 'default')
+    cfg = get_current_user_config()
+    
+    if cfg.get('is_locked'):
+        return jsonify({"error": "Workspace configuration is locked. Click 'Unlock IDs' to make changes."}), 400
+
     data = request.get_json() or {}
-    drive_folder_id = data.get('drive_folder_id')
-    spreadsheet_id = data.get('spreadsheet_id')
+    drive_folder_id = data.get('drive_folder_id') or cfg.get('drive_folder_id')
+    spreadsheet_id = data.get('spreadsheet_id') or cfg.get('spreadsheet_id')
 
     if drive_folder_id:
         session['drive_folder_id'] = drive_folder_id
     if spreadsheet_id:
         session['spreadsheet_id'] = spreadsheet_id
 
-    save_workspace_config(get_user_spreadsheet_id(), get_user_drive_folder_id())
+    save_user_config(email, spreadsheet_id, drive_folder_id, is_locked=False)
+    save_workspace_config(spreadsheet_id, drive_folder_id)
 
     drive_srv, sheets_srv, _ = get_google_services(session['credentials'])
     
@@ -927,6 +1055,11 @@ def oauth2callback():
         session['credentials'] = creds_dict
         session['user_email'] = email
         save_creds_to_disk(creds_dict)
+
+        # Restore saved configuration for this user
+        user_cfg = get_current_user_config()
+        session['spreadsheet_id'] = user_cfg.get('spreadsheet_id', DEFAULT_SPREADSHEET_ID)
+        session['drive_folder_id'] = user_cfg.get('drive_folder_id', DEFAULT_DRIVE_FOLDER_ID)
 
         if session.get('spreadsheet_id'):
             try:
