@@ -16,7 +16,7 @@ from googleapiclient.discovery import build
 import face_recognition
 from PIL import Image, ImageOps
 
-VERSION = "v5-adc-headless-fix"
+VERSION = "v5-public-checkin-fix"
 
 ALLOWED_USERS = {"pranavcoolstar@gmail.com", "makwanapranav26@gmail.com"}
 
@@ -59,7 +59,13 @@ def save_user_config(email, sheet_id, folder_id, is_locked=False):
         print(f"Failed to save user configs: {e}")
 
 def get_current_user_config():
-    email = session.get('user_email', 'default')
+    email = session.get('user_email')
+    if not email:
+        return {
+            "spreadsheet_id": DEFAULT_SPREADSHEET_ID,
+            "drive_folder_id": DEFAULT_DRIVE_FOLDER_ID,
+            "is_locked": False
+        }
     configs = load_all_user_configs()
     if email in configs:
         return configs[email]
@@ -85,12 +91,16 @@ def load_workspace_config():
     return {"spreadsheet_id": DEFAULT_SPREADSHEET_ID, "drive_folder_id": DEFAULT_DRIVE_FOLDER_ID}
 
 def get_user_spreadsheet_id():
-    cfg = get_current_user_config()
-    return cfg.get('spreadsheet_id') or session.get('spreadsheet_id') or load_workspace_config().get('spreadsheet_id', DEFAULT_SPREADSHEET_ID)
+    if 'user_email' in session:
+        cfg = get_current_user_config()
+        return cfg.get('spreadsheet_id') or session.get('spreadsheet_id') or load_workspace_config().get('spreadsheet_id', DEFAULT_SPREADSHEET_ID)
+    return DEFAULT_SPREADSHEET_ID
 
 def get_user_drive_folder_id():
-    cfg = get_current_user_config()
-    return cfg.get('drive_folder_id') or session.get('drive_folder_id') or load_workspace_config().get('drive_folder_id', DEFAULT_DRIVE_FOLDER_ID)
+    if 'user_email' in session:
+        cfg = get_current_user_config()
+        return cfg.get('drive_folder_id') or session.get('drive_folder_id') or load_workspace_config().get('drive_folder_id', DEFAULT_DRIVE_FOLDER_ID)
+    return DEFAULT_DRIVE_FOLDER_ID
 
 def save_creds_to_disk(creds_dict):
     global system_creds_cache
@@ -185,7 +195,6 @@ def get_google_services(creds_dict=None):
                 creds.refresh(Request())
             except Exception: pass
 
-    # Fallback to Application Default Credentials (ADC) if no user OAuth token
     if not creds:
         try:
             creds, _ = google.auth.default(scopes=[
