@@ -8,6 +8,7 @@ from datetime import datetime
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from flask import Flask, request, jsonify, redirect, session, url_for
+import google.auth
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 from google_auth_oauthlib.flow import Flow
@@ -15,7 +16,7 @@ from googleapiclient.discovery import build
 import face_recognition
 from PIL import Image, ImageOps
 
-VERSION = "v5-lock-unlock-config"
+VERSION = "v5-adc-headless-fix"
 
 ALLOWED_USERS = {"pranavcoolstar@gmail.com", "makwanapranav26@gmail.com"}
 
@@ -23,7 +24,7 @@ TOKEN_FILE = "/tmp/google_tokens.json"
 WORKSPACE_FILE = "/tmp/active_workspace.json"
 USER_CONFIGS_FILE = "/tmp/user_configs.json"
 
-DEFAULT_SPREADSHEET_ID = "1gWWBNpKU1lIEz7RCiCycIqvg_QJKARqPJHbpIr78RvE"
+DEFAULT_SPREADSHEET_ID = "1Wg53WXgVmLqpcr0Io58Pw0tkpPDdCUryeycdRFLc1Oc"
 DEFAULT_DRIVE_FOLDER_ID = "1FBhdmP9xzKnD8-aCx5aJIV3jcgoujWIm"
 
 app = Flask(__name__)
@@ -169,18 +170,31 @@ def extract_face_embeddings(image_bytes):
         print(f"Error extracting face embedding: {e}")
         return []
 
-def get_google_services(creds_dict):
-    client_config, _ = get_client_config()
-    if client_config and 'web' in client_config:
-        creds_dict['client_id'] = client_config['web']['client_id']
-        creds_dict['client_secret'] = client_config['web']['client_secret']
-        creds_dict['token_uri'] = client_config['web'].get('token_uri', 'https://oauth2.googleapis.com/token')
+def get_google_services(creds_dict=None):
+    creds = None
+    if creds_dict:
+        client_config, _ = get_client_config()
+        if client_config and 'web' in client_config:
+            creds_dict['client_id'] = client_config['web']['client_id']
+            creds_dict['client_secret'] = client_config['web']['client_secret']
+            creds_dict['token_uri'] = client_config['web'].get('token_uri', 'https://oauth2.googleapis.com/token')
 
-    creds = Credentials.from_authorized_user_info(creds_dict)
-    if creds and creds.expired and creds.refresh_token:
+        creds = Credentials.from_authorized_user_info(creds_dict)
+        if creds and creds.expired and creds.refresh_token:
+            try:
+                creds.refresh(Request())
+            except Exception: pass
+
+    # Fallback to Application Default Credentials (ADC) if no user OAuth token
+    if not creds:
         try:
-            creds.refresh(Request())
-        except Exception: pass
+            creds, _ = google.auth.default(scopes=[
+                'https://www.googleapis.com/auth/drive',
+                'https://www.googleapis.com/auth/spreadsheets',
+                'https://www.googleapis.com/auth/gmail.send'
+            ])
+        except Exception as adc_err:
+            print(f"ADC Fallback Notice: {adc_err}")
 
     drive_service = build('drive', 'v3', credentials=creds)
     sheets_service = build('sheets', 'v4', credentials=creds)
@@ -480,7 +494,6 @@ def dashboard():
                 </div>
             </div>
 
-            <!-- Workspace Config Section with Lock/Unlock -->
             <div class="card" style="padding: 16px 24px;">
                 <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 12px;">
                     <span style="font-size: 14px; font-weight: 700; color: #1e293b;">Active User Resource Config</span>
@@ -618,7 +631,7 @@ def dashboard():
                     if (data.error) throw new Error(data.error);
 
                     applyLockUIState(data.is_locked);
-                    logConsole(data.is_locked ? 'Workspace IDs locked successfully! Configuration will remain unchanged across logins.' : 'Workspace unlocked. You can now edit/browse Drive & Sheet IDs.');
+                    logConsole(data.is_locked ? 'Workspace IDs locked successfully!' : 'Workspace unlocked.');
                 } catch (err) {
                     logConsole('ERROR toggling lock state: ' + err.message);
                 }
@@ -897,7 +910,7 @@ def api_drive_resources():
     
     res_type = request.args.get('type', 'folder')
     try:
-        drive_srv, _, _ = get_google_services(session['credentials'])
+        drive_srv, _, _ = get_google_services(session.get('credentials'))
         
         if res_type == 'folder':
             q = "mimeType = 'application/vnd.google-apps.folder' and trashed = false"
@@ -914,7 +927,7 @@ def api_resource_names():
     if 'credentials' not in session:
         return jsonify({"error": "Unauthorized"}), 401
     try:
-        drive_srv, _, _ = get_google_services(session['credentials'])
+        drive_srv, _, _ = get_google_services(session.get('credentials'))
         
         folder_name, sheet_name = "N/A", "N/A"
         
@@ -960,7 +973,7 @@ def api_update_config():
     save_user_config(email, spreadsheet_id, drive_folder_id, is_locked=False)
     save_workspace_config(spreadsheet_id, drive_folder_id)
 
-    drive_srv, sheets_srv, _ = get_google_services(session['credentials'])
+    drive_srv, sheets_srv, _ = get_google_services(session.get('credentials'))
     
     if spreadsheet_id:
         try:
@@ -1056,7 +1069,6 @@ def oauth2callback():
         session['user_email'] = email
         save_creds_to_disk(creds_dict)
 
-        # Restore saved configuration for this user
         user_cfg = get_current_user_config()
         session['spreadsheet_id'] = user_cfg.get('spreadsheet_id', DEFAULT_SPREADSHEET_ID)
         session['drive_folder_id'] = user_cfg.get('drive_folder_id', DEFAULT_DRIVE_FOLDER_ID)
@@ -1096,8 +1108,6 @@ def patron_checkin():
     embedding_json = json.dumps(encodings[0].tolist())
 
     creds_to_use = session.get('credentials') or load_creds()
-    if not creds_to_use:
-        return jsonify({"error": "Server not authenticated with Google Sheets yet. Admin must log in once at /api/auth/login to authorize guest check-ins."}), 503
 
     try:
         _, sheets_srv, _ = get_google_services(creds_to_use)
@@ -1116,7 +1126,9 @@ def patron_checkin():
 
         return jsonify({"success": True, "version": VERSION})
     except Exception as e:
-        return jsonify({"error": f"Failed to append to Google Sheets: {str(e)}"}), 500
+        err_msg = str(e)
+        print(f"Checkin Error: {traceback.format_exc()}")
+        return jsonify({"error": f"Failed to append to Google Sheets: {err_msg}"}), 500
 
 @app.route('/api/admin/folders')
 def api_get_folders():
